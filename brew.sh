@@ -1,3 +1,4 @@
+# https://github.com/mathiasbynens/dotfiles
 #!/usr/bin/env bash
 
 # Install Homebrew
