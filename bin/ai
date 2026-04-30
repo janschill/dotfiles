@@ -1,0 +1,461 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROVIDER="${AI_PROVIDER:-ollama}"
+MODEL="${AI_MODEL:-}"
+OLLAMA_MODEL_OVERRIDE="${OLLAMA_MODEL:-}"
+CLAUDE_MODEL_DEFAULT="${AI_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-sonnet-4-6}}"
+AGENT_MODEL_DEFAULT="${AI_AGENT_MODEL:-${CURSOR_MODEL:-}}"
+CODEX_MODEL_DEFAULT="${AI_CODEX_MODEL:-${CODEX_MODEL:-}}"
+PROMPT="${AI_PROMPT:-}"
+NO_INTERACTIVE="${AI_NO_INTERACTIVE:-0}"
+KEEPALIVE="${AI_OLLAMA_KEEPALIVE:-0}"
+PRINT_MODEL=0
+LIST_MODELS=0
+
+DEFAULT_PULL_MODEL="${AI_DEFAULT_MODEL:-qwen3:8b}"
+PREFERRED_MODELS="${AI_MODEL_PREFERENCES:-Qwen3-coder:30b Qwen3:30b qwen3-coder:30b qwen3:30b llama3.2:latest llama3.1:latest mistral:latest gemma3:latest}"
+
+usage() {
+    cat <<'EOF'
+usage: ai [options] PROMPT
+
+Run an LLM prompt with optional stdin context.
+
+Examples:
+  ai "Summarize this"
+  ai "Proofread this markdown" < blog/post.md
+  AI_MODEL=Qwen3:30b ai "Write a short description" < blog/post.md
+  AI_PROVIDER=claude ai "Summarize this" < notes.md
+  AI_PROVIDER=agent ai "Ask Cursor Agent" < notes.md
+  AI_PROVIDER=codex ai "Ask Codex" < notes.md
+
+Options:
+  -m, --model MODEL      Use MODEL instead of selecting one
+  -p, --prompt PROMPT    Set the prompt explicitly
+      --provider NAME    Use ollama, claude, agent, codex, or auto
+      --ollama           Use Ollama
+      --claude           Use Claude
+      --agent            Use Cursor Agent
+      --codex            Use Codex
+      --list-models      Print provider models when supported
+      --print-model      Print the selected model and exit
+      --no-interactive   Do not prompt for model selection
+  -h, --help             Show this help
+
+Environment:
+  AI_PROVIDER            Provider to use: ollama, claude, agent, codex, or auto.
+                         Default: ollama
+  AI_MODEL               Default model to use
+  OLLAMA_MODEL           Ollama model name when AI_MODEL is unset
+  AI_CLAUDE_MODEL        Claude model name when AI_MODEL is unset
+  CLAUDE_MODEL           Fallback Claude model name when AI_CLAUDE_MODEL is unset
+  AI_AGENT_MODEL         Cursor Agent model name when AI_MODEL is unset
+  CURSOR_MODEL           Fallback Cursor Agent model name
+  AI_CODEX_MODEL         Codex model name when AI_MODEL is unset
+  CODEX_MODEL            Fallback Codex model name
+  AI_PROMPT              Default prompt when no prompt argument is provided
+  AI_NO_INTERACTIVE=1    Disable interactive model selection
+  AI_OLLAMA_KEEPALIVE    Ollama keepalive duration. Default: 0, unload after run
+  AI_DEFAULT_MODEL       Model suggested when none are installed
+  AI_MODEL_PREFERENCES   Space-separated preference list for auto-pick
+  AI_OLLAMA_FLAGS        Extra flags passed to `ollama run`
+  AI_CLAUDE_FLAGS        Extra flags passed to `claude -p`
+  AI_AGENT_FLAGS         Extra flags passed to `agent --print`
+  AI_CODEX_FLAGS         Extra flags passed to `codex exec`
+EOF
+}
+
+die() {
+    echo "ai: $*" >&2
+    exit 1
+}
+
+has_tty() {
+    [[ -r /dev/tty && -w /dev/tty ]]
+}
+
+interactive_enabled() {
+    [[ "$NO_INTERACTIVE" != "1" && "$NO_INTERACTIVE" != "true" ]] && has_tty
+}
+
+require_ollama() {
+    command -v ollama >/dev/null 2>&1 || die "'ollama' CLI not found in PATH"
+}
+
+require_claude() {
+    command -v claude >/dev/null 2>&1 || die "'claude' CLI not found in PATH"
+}
+
+require_agent() {
+    command -v agent >/dev/null 2>&1 || die "'agent' CLI not found in PATH"
+}
+
+require_codex() {
+    command -v codex >/dev/null 2>&1 || die "'codex' CLI not found in PATH"
+}
+
+ollama_models() {
+    local output
+    if ! output="$(ollama ls 2>&1)"; then
+        die "could not list Ollama models: $output"
+    fi
+    printf '%s\n' "$output" | awk 'NR > 1 && $1 != "" { print $1 }'
+}
+
+pick_preferred_model() {
+    local model preferred
+    for preferred in $PREFERRED_MODELS; do
+        for model in "$@"; do
+            if [[ "$model" == "$preferred" ]]; then
+                printf '%s\n' "$model"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+pick_numbered_model() {
+    local models=("$@")
+    local choice i
+
+    {
+        echo "ai: choose an Ollama model:"
+        for ((i = 0; i < ${#models[@]}; i++)); do
+            printf '  %d) %s\n' "$((i + 1))" "${models[$i]}"
+        done
+        printf 'Selection [1]: '
+    } > /dev/tty
+
+    IFS= read -r choice < /dev/tty || die "model selection cancelled"
+    choice="${choice:-1}"
+
+    if [[ ! "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#models[@]})); then
+        die "invalid model selection: $choice"
+    fi
+
+    printf '%s\n' "${models[$((choice - 1))]}"
+}
+
+pick_interactive_model() {
+    local models=("$@")
+    local selected
+
+    if command -v fzf >/dev/null 2>&1; then
+        if selected="$(printf '%s\n' "${models[@]}" | fzf --prompt='Ollama model> ')" && [[ -n "$selected" ]]; then
+            printf '%s\n' "$selected"
+            return 0
+        fi
+        die "model selection cancelled"
+    fi
+
+    pick_numbered_model "${models[@]}"
+}
+
+pull_missing_model_interactively() {
+    local model
+
+    if ! interactive_enabled; then
+        die "no Ollama models installed. Run 'ollama pull $DEFAULT_PULL_MODEL' or set AI_MODEL."
+    fi
+
+    {
+        echo "ai: no Ollama models are installed."
+        printf 'Model to pull and use [%s]: ' "$DEFAULT_PULL_MODEL"
+    } > /dev/tty
+
+    IFS= read -r model < /dev/tty || die "model selection cancelled"
+    model="${model:-$DEFAULT_PULL_MODEL}"
+    [[ -n "$model" ]] || die "empty model name"
+
+    echo "ai: pulling $model" > /dev/tty
+    ollama pull "$model" > /dev/tty
+    printf '%s\n' "$model"
+}
+
+select_model() {
+    local models=()
+    local model output
+
+    if ! output="$(ollama_models)"; then
+        exit 1
+    fi
+    while IFS= read -r model; do
+        [[ -n "$model" ]] && models+=("$model")
+    done <<< "$output"
+
+    if ((LIST_MODELS)); then
+        printf '%s\n' "${models[@]}"
+        exit 0
+    fi
+
+    case "${#models[@]}" in
+        0)
+            pull_missing_model_interactively
+            ;;
+        1)
+            printf '%s\n' "${models[0]}"
+            ;;
+        *)
+            if interactive_enabled; then
+                pick_interactive_model "${models[@]}"
+            elif pick_preferred_model "${models[@]}"; then
+                return 0
+            else
+                printf '%s\n' "${models[0]}"
+            fi
+            ;;
+    esac
+}
+
+resolve_provider() {
+    case "$PROVIDER" in
+        ollama|claude|agent|codex)
+            printf '%s\n' "$PROVIDER"
+            ;;
+        auto)
+            if command -v ollama >/dev/null 2>&1 && ollama ls >/dev/null 2>&1; then
+                printf 'ollama\n'
+            elif command -v claude >/dev/null 2>&1; then
+                printf 'claude\n'
+            elif command -v agent >/dev/null 2>&1; then
+                printf 'agent\n'
+            elif command -v codex >/dev/null 2>&1; then
+                printf 'codex\n'
+            elif command -v ollama >/dev/null 2>&1; then
+                printf 'ollama\n'
+            else
+                die "none of 'ollama', 'claude', 'agent', or 'codex' is available"
+            fi
+            ;;
+        *)
+            die "unsupported provider '$PROVIDER' (expected ollama, claude, agent, codex, or auto)"
+            ;;
+    esac
+}
+
+run_ollama() {
+    local model="$MODEL"
+    if [[ -z "$model" && -n "$OLLAMA_MODEL_OVERRIDE" ]]; then
+        model="$OLLAMA_MODEL_OVERRIDE"
+    fi
+
+    require_ollama
+
+    if ((LIST_MODELS)); then
+        ollama_models
+        exit 0
+    fi
+
+    if [[ -z "$model" ]]; then
+        model="$(select_model)"
+    fi
+
+    if ((PRINT_MODEL)); then
+        printf '%s\n' "$model"
+        exit 0
+    fi
+
+    read -r -a OLLAMA_FLAGS <<< "${AI_OLLAMA_FLAGS:-}"
+    if [[ -n "$KEEPALIVE" ]]; then
+        OLLAMA_FLAGS+=(--keepalive "$KEEPALIVE")
+    fi
+
+    if [[ -z "$PROMPT" ]]; then
+        exec ollama run "${OLLAMA_FLAGS[@]}" "$model"
+    fi
+
+    if [[ -t 0 ]]; then
+        exec ollama run "${OLLAMA_FLAGS[@]}" "$model" "$PROMPT" < /dev/null
+    else
+        exec ollama run "${OLLAMA_FLAGS[@]}" "$model" "$PROMPT"
+    fi
+}
+
+run_claude() {
+    local model="${MODEL:-$CLAUDE_MODEL_DEFAULT}"
+
+    require_claude
+
+    if ((LIST_MODELS)); then
+        die "--list-models is only supported for Ollama"
+    fi
+
+    if ((PRINT_MODEL)); then
+        printf '%s\n' "$model"
+        exit 0
+    fi
+
+    read -r -a CLAUDE_FLAGS <<< "${AI_CLAUDE_FLAGS:-}"
+    if [[ -n "$model" ]]; then
+        CLAUDE_FLAGS+=(--model "$model")
+    fi
+
+    if [[ -t 0 ]]; then
+        exec claude -p "${CLAUDE_FLAGS[@]}" "$PROMPT" < /dev/null
+    fi
+
+    if [[ -z "$PROMPT" ]]; then
+        exec claude -p "${CLAUDE_FLAGS[@]}"
+    fi
+
+    {
+        printf '%s\n\n' "$PROMPT"
+        printf 'Input:\n'
+        cat
+    } | claude -p "${CLAUDE_FLAGS[@]}"
+}
+
+compose_prompt_with_stdin() {
+    if [[ -z "$PROMPT" ]]; then
+        cat
+    else
+        printf '%s\n\n' "$PROMPT"
+        printf 'Input:\n'
+        cat
+    fi
+}
+
+run_agent() {
+    local model="${MODEL:-$AGENT_MODEL_DEFAULT}"
+
+    require_agent
+
+    if ((LIST_MODELS)); then
+        exec agent --list-models
+    fi
+
+    if ((PRINT_MODEL)); then
+        if [[ -n "$model" ]]; then
+            printf '%s\n' "$model"
+        else
+            printf '(agent default)\n'
+        fi
+        exit 0
+    fi
+
+    read -r -a AGENT_FLAGS <<< "${AI_AGENT_FLAGS:---mode ask --trust}"
+    if [[ -n "$model" ]]; then
+        AGENT_FLAGS+=(--model "$model")
+    fi
+
+    if [[ -t 0 ]]; then
+        exec agent --print "${AGENT_FLAGS[@]}" "$PROMPT" < /dev/null
+    fi
+
+    agent --print "${AGENT_FLAGS[@]}" "$(compose_prompt_with_stdin)"
+}
+
+run_codex() {
+    local model="${MODEL:-$CODEX_MODEL_DEFAULT}"
+
+    require_codex
+
+    if ((LIST_MODELS)); then
+        die "--list-models is not supported for Codex"
+    fi
+
+    if ((PRINT_MODEL)); then
+        if [[ -n "$model" ]]; then
+            printf '%s\n' "$model"
+        else
+            printf '(codex default)\n'
+        fi
+        exit 0
+    fi
+
+    read -r -a CODEX_FLAGS <<< "${AI_CODEX_FLAGS:---sandbox read-only --ask-for-approval never}"
+    if [[ -n "$model" ]]; then
+        CODEX_FLAGS+=(--model "$model")
+    fi
+
+    if [[ -z "$PROMPT" ]]; then
+        exec codex exec "${CODEX_FLAGS[@]}" -
+    fi
+
+    exec codex exec "${CODEX_FLAGS[@]}" "$PROMPT"
+}
+
+prompt_parts=()
+while (($#)); do
+    case "$1" in
+        -m|--model)
+            [[ $# -ge 2 ]] || die "$1 requires a model"
+            MODEL="$2"
+            shift 2
+            ;;
+        -p|--prompt)
+            [[ $# -ge 2 ]] || die "$1 requires a prompt"
+            PROMPT="$2"
+            shift 2
+            ;;
+        --provider)
+            [[ $# -ge 2 ]] || die "$1 requires a provider"
+            PROVIDER="$2"
+            shift 2
+            ;;
+        --ollama)
+            PROVIDER="ollama"
+            shift
+            ;;
+        --claude)
+            PROVIDER="claude"
+            shift
+            ;;
+        --agent)
+            PROVIDER="agent"
+            shift
+            ;;
+        --codex)
+            PROVIDER="codex"
+            shift
+            ;;
+        --list-models)
+            LIST_MODELS=1
+            shift
+            ;;
+        --print-model)
+            PRINT_MODEL=1
+            shift
+            ;;
+        --no-interactive)
+            NO_INTERACTIVE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            prompt_parts+=("$@")
+            break
+            ;;
+        *)
+            prompt_parts+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if ((${#prompt_parts[@]})); then
+    if [[ -n "$PROMPT" ]]; then
+        PROMPT="$PROMPT ${prompt_parts[*]}"
+    else
+        PROMPT="${prompt_parts[*]}"
+    fi
+fi
+
+if [[ -z "$PROMPT" && -t 0 && "$LIST_MODELS" -eq 0 && "$PRINT_MODEL" -eq 0 ]]; then
+    die "missing prompt"
+fi
+
+PROVIDER="$(resolve_provider)"
+
+case "$PROVIDER" in
+    ollama) run_ollama ;;
+    claude) run_claude ;;
+    agent)  run_agent ;;
+    codex)  run_codex ;;
+esac
