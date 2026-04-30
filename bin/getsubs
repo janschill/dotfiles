@@ -1,0 +1,164 @@
+#!/usr/bin/env -S deno run --allow-run --allow-read --allow-write
+// Description: Extract YouTube video subtitles as plain text
+
+import * as path from "jsr:@std/path";
+import * as webvttModule from "npm:webvtt-parser";
+
+const { WebVTTParser } = webvttModule.default;
+
+const HELP = `
+getsubs — extract YouTube video subtitles as plain text
+
+Usage:
+  getsubs <youtube-url>
+  getsubs --help
+
+Arguments:
+  youtube-url   URL of the YouTube video
+
+Extracts English subtitles (manual or auto-generated) from a
+YouTube video and outputs them as clean plain text.
+
+Dependencies:
+  - yt-dlp
+  - deno
+
+Example:
+  getsubs https://www.youtube.com/watch?v=dQw4w9WgXcQ
+`.trim();
+
+async function getVtt(
+  url: string,
+  arg: "--write-sub" | "--write-auto-sub",
+): Promise<null | string> {
+  const tempDir = await Deno.makeTempDir();
+
+  try {
+    const cmd = new Deno.Command("yt-dlp", {
+      args: [
+        "--no-warnings",
+        "--skip-download",
+        arg,
+        "--sub-lang",
+        "en",
+        "--sub-format",
+        "vtt",
+        "-o",
+        path.join(tempDir, "%(id)s.%(ext)s"),
+        url,
+      ],
+      stdout: "piped",
+      stderr: "inherit",
+    });
+
+    const { code } = await cmd.output();
+    if (code !== 0) throw new Error(`yt-dlp command failed with code ${code}`);
+
+    for await (const entry of Deno.readDir(tempDir)) {
+      if (!entry.name.endsWith(".vtt")) continue;
+
+      const vttPath = path.join(tempDir, entry.name);
+      return await Deno.readTextFile(vttPath);
+    }
+
+    return null;
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+}
+
+type VttCue = { type: "text"; value: string } & {
+  type: unknown;
+  children?: VttCue[];
+};
+
+const getVttCueText = ({ children = [] }: Readonly<VttCue>): string =>
+  children.reduce((result, child) => {
+    if (child.type === "text") result += child.value;
+    if (child.children) result += getVttCueText(child);
+    return result;
+  }, "");
+
+/**
+ * Convert a VTT string to a list of lines.
+ *
+ * YouTube auto-captions emit each cue 2-3 times as scrolling text, and
+ * encode speaker changes as `&gt;&gt;` markers that the WebVTT parser
+ * leaves as `>;>;` artifacts. We strip the markers, dedupe consecutive
+ * duplicate cue text, and emit a blank line before any line whose
+ * source cue began with a speaker-change marker — so downstream
+ * formatters (e.g. Markdown) get paragraphs at speaker turns.
+ */
+function vttLines(vtt: string): Iterable<string> {
+  const parser = new WebVTTParser();
+  const tree = parser.parse(vtt, "metadata");
+
+  let rawResult: string = "";
+  for (const cue of tree.cues) {
+    rawResult += getVttCueText(cue.tree).trim() + "\n";
+  }
+
+  type Cue = { text: string; speakerChange: boolean };
+  const cues: Cue[] = rawResult
+    .split(/\r?\n/g)
+    .flatMap((line): Cue[] => {
+      const trimmed = line.trim();
+      if (!trimmed) return [];
+      const speakerChange = /^[>;]/.test(trimmed);
+      const text = trimmed.replace(/^[>;\s]+|\s*;+/g, "");
+      return text ? [{ text, speakerChange }] : [];
+    });
+
+  const deduped: Cue[] = [];
+  for (const cue of cues) {
+    const last = deduped[deduped.length - 1];
+    if (last && last.text === cue.text) {
+      last.speakerChange = last.speakerChange || cue.speakerChange;
+    } else {
+      deduped.push({ ...cue });
+    }
+  }
+
+  const out: string[] = [];
+  for (const cue of deduped) {
+    if (cue.speakerChange && out.length > 0) out.push("");
+    out.push(cue.text);
+  }
+  return out;
+}
+
+async function main(): Promise<void> {
+  const [url, ...rest] = Deno.args;
+
+  if (url === "--help" || url === "-h") {
+    console.log(HELP);
+    Deno.exit(0);
+  }
+
+  if (rest.length) {
+    console.error("Error: too many arguments");
+    console.error(HELP);
+    Deno.exit(1);
+  }
+
+  if (!url) {
+    console.error("Error: needs a URL");
+    console.error(HELP);
+    Deno.exit(1);
+  }
+
+  const vtt =
+    (await getVtt(url, "--write-sub")) ||
+    (await getVtt(url, "--write-auto-sub"));
+
+  if (!vtt) {
+    console.error("Error: no subtitles found");
+    Deno.exit(1);
+  }
+
+  for (const line of vttLines(vtt)) {
+    console.log(line);
+  }
+}
+
+await main();

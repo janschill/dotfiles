@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: Sleep then notify (requires sfx command)
+
+usage() {
+  cat <<'EOF'
+timer — sleep then notify
+
+Usage:
+  timer <duration>
+  timer --help
+
+Arguments:
+  duration   Time to sleep (e.g., 5m, 1h, 30s, 90)
+
+Sleeps for the specified duration, then plays a sound
+and sends a desktop notification.
+
+Dependencies:
+  - sfx (for sound effect)
+  - notify (from ~/bin)
+
+Examples:
+  timer 5m      # 5 minutes
+  timer 1h      # 1 hour
+  timer 30      # 30 seconds
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ -z "${1:-}" ]]; then
+  echo "Error: No duration provided" >&2
+  usage >&2
+  exit 1
+fi
+
+sleep "$1"
+
+# Play sound if sfx is available
+if command -v sfx &>/dev/null; then
+  sfx ringaling
+fi
+
+notify 'timer complete' "$1"

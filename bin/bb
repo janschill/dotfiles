@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: Run command in background, suppressing output
+
+usage() {
+  cat <<'EOF'
+bb — run command in background, suppressing output
+
+Usage:
+  bb <command> [args...]
+  bb --help
+
+Runs the given command in the background with stdout and stderr
+redirected to /dev/null when attached to a terminal.
+
+Example:
+  bb open -a Safari
+  bb code .
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "Error: No command provided" >&2
+  usage >&2
+  exit 1
+fi
+
+if test -t 1; then
+  exec 1>/dev/null
+fi
+
+if test -t 2; then
+  exec 2>/dev/null
+fi
+
+"$@" &

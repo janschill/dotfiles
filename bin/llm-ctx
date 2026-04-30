@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# Description: Inject context into LLMs from notes repo
+
+# ---------------------------------------------------------------------------
+# llm-ctx: ergonomic context injector for LLMs
+#
+# Supports:
+#   llm-ctx skill observability/splunk
+#   llm-ctx snippet engineering/go/UPGRADE_GUIDE.md
+#   llm-ctx section engineering/go/UPGRADE_GUIDE.md "Migration Patterns"
+#
+# Output goes to pbcopy if available, otherwise prints to stdout.
+#
+# Requires NOTES_ROOT to be set, e.g. in ~/.zshrc:
+#   export NOTES_ROOT="$HOME/code/notes"
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+
+# ---------- Helpers ---------------------------------------------------------
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+check_root() {
+  [[ -z "${NOTES_ROOT:-}" ]] && die "NOTES_ROOT is not set"
+  [[ ! -d "$NOTES_ROOT" ]] && die "NOTES_ROOT does not point to a directory: $NOTES_ROOT"
+  return 0
+}
+
+# Copy stdin to pbcopy when available, otherwise echo to stdout.
+pb() {
+  local tmp
+  tmp=$(mktemp)
+
+  cat >"$tmp"
+
+  if command -v pbcopy >/dev/null 2>&1; then
+    if pbcopy <"$tmp"; then
+      rm -f "$tmp"
+      return 0
+    fi
+    echo "WARN: pbcopy failed; printing output" >&2
+  fi
+
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+# Print paths relative to NOTES_ROOT and sort them once.
+rel_sed_sort() {
+  sed "s|^$NOTES_ROOT/||" | LC_ALL=C sort
+}
+
+# ---------- Skill Extraction ------------------------------------------------
+
+extract_skill() {
+  local skill="$1"
+  local file="$NOTES_ROOT/llms/skills/$skill/SKILL.md"
+
+  [[ ! -f "$file" ]] && die "SKILL.md not found: $file"
+
+  # If the file contains "## For LLMs", extract only that block.
+  if grep -q '^## For LLMs' "$file"; then
+    awk '
+      /^## For LLMs/ {flag=1; next}
+      /^## / && flag {flag=0}
+      flag
+    ' "$file"
+  else
+    cat "$file"
+  fi
+}
+
+# ---------- Snippet Extraction ---------------------------------------------
+
+extract_snippet() {
+  local rel="$1"
+  local file="$NOTES_ROOT/$rel"
+
+  [[ ! -f "$file" ]] && die "File not found: $file"
+
+  cat "$file"
+}
+
+# ---------- Section Extraction ---------------------------------------------
+
+extract_section() {
+  local rel="$1"
+  local heading="$2"
+  local file="$NOTES_ROOT/$rel"
+
+  [[ ! -f "$file" ]] && die "File not found: $file"
+  [[ -z "$heading" ]] && die "Missing section heading"
+
+  local target
+  target=$(echo "$heading" | tr '[:upper:]' '[:lower:]' | sed 's/^#\+\s*//; s/[[:space:]]\+$//')
+
+  local content
+  content=$(
+    awk -v target="$target" '
+      function norm(h) {
+        gsub(/^#+[[:space:]]*/, "", h)
+        gsub(/[[:space:]]+$/, "", h)
+        return tolower(h)
+      }
+      /^#+[[:space:]]+/ {
+        match($0, /^#+/)
+        current_lvl = RLENGTH
+        heading = norm($0)
+
+        if (heading == target) {
+          flag = 1
+          target_lvl = current_lvl
+          next
+        }
+
+        if (flag && current_lvl <= target_lvl) {
+          exit
+        }
+      }
+      flag { print }
+    ' "$file"
+  )
+
+  [[ -z "$content" ]] && die "Section not found: $heading in $rel"
+  printf '%s\n' "$content"
+}
+
+list_sections() {
+  local rel="$1"
+  local file="$NOTES_ROOT/$rel"
+
+  [[ ! -f "$file" ]] && die "File not found: $file"
+
+  awk '
+    /^#+[[:space:]]+/ {
+      match($0, /^#+/)
+      lvl = RLENGTH
+      heading = $0
+      gsub(/^#+[[:space:]]*/, "", heading)
+      gsub(/[[:space:]]+$/, "", heading)
+      indent = (lvl > 1 ? sprintf("%*s", (lvl-2)*2, "") : "")
+      printf("%s- %s\n", indent, heading)
+    }
+  ' "$file"
+}
+
+# ---------- Discovery -------------------------------------------------------
+
+list_skills() {
+  local skills_root="$NOTES_ROOT/llms/skills"
+  [[ ! -d "$skills_root" ]] && die "Skills directory not found: $skills_root"
+
+  find "$skills_root" -maxdepth 4 -type f -name "SKILL.md" -print | rel_sed_sort
+}
+
+list_notes() {
+  local sub="${1:-}"
+  local base="$NOTES_ROOT"
+
+  if [[ -n "$sub" ]]; then
+    base="$base/$sub"
+  fi
+
+  [[ ! -d "$base" ]] && die "Directory not found: $base"
+
+  find "$base" -type f \( -name "*.md" -o -name "*.txt" \) -print | rel_sed_sort
+}
+
+search_notes() {
+  local term="$1"
+  [[ -z "$term" ]] && die "Search term is required"
+
+  find "$NOTES_ROOT" -type f \( -name "*.md" -o -name "*.txt" \) -print \
+    | rel_sed_sort \
+    | grep -i -- "$term" || true
+}
+
+# ---------- Usage -----------------------------------------------------------
+
+usage() {
+  cat <<EOF
+llm-ctx — inject context into LLMs from your notes repo
+
+Usage:
+  llm-ctx [--stdout] skill <path>               Extract "## For LLMs" from a SKILL.md
+  llm-ctx [--stdout] snippet <relative-path>    Copy entire file under \$NOTES_ROOT
+  llm-ctx [--stdout] section <path> "<header>"  Extract one markdown section
+  llm-ctx [--stdout] sections <path>            List markdown headings in a file
+  llm-ctx list [subdir]                         List markdown/txt files
+  llm-ctx search <term>                         Fuzzy path search (case-insensitive)
+  llm-ctx skills                                List available skills
+
+Examples:
+  llm-ctx skill observability/splunk
+  llm-ctx snippet engineering/go/UPGRADE_GUIDE.md
+  llm-ctx section engineering/go/UPGRADE_GUIDE.md "Migration Patterns"
+  llm-ctx sections engineering/go/UPGRADE_GUIDE.md
+  llm-ctx list llms
+  llm-ctx search gosql
+  llm-ctx skills
+
+Flags:
+  --stdout   Print to stdout instead of copying to clipboard
+
+Output is piped into pbcopy if available (default), else printed to stdout.
+EOF
+}
+
+# ---------- Main ------------------------------------------------------------
+
+main() {
+  check_root
+
+  local to_stdout=0
+  # echo "to_stdout: $to_stdout" >&2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stdout|-p) to_stdout=1; shift ;;
+      --help|-h) usage; exit 0 ;;
+      *) break ;;
+    esac
+  done
+
+  [[ $# -lt 1 ]] && { usage; exit 1; }
+
+  local cmd="$1"
+  shift
+
+  dispatch() {
+    case "$cmd" in
+      skill)
+        [[ $# -ne 1 ]] && die "Usage: llm-ctx skill <path>"
+        extract_skill "$1"
+        ;;
+      snippet)
+        [[ $# -ne 1 ]] && die "Usage: llm-ctx snippet <relative-path>"
+        extract_snippet "$1"
+        ;;
+      section)
+        [[ $# -ne 2 ]] && die 'Usage: llm-ctx section <path> "<heading>"'
+        extract_section "$1" "$2"
+        ;;
+      sections)
+        [[ $# -ne 1 ]] && die "Usage: llm-ctx sections <path>"
+        list_sections "$1"
+        ;;
+      list)
+        [[ $# -gt 1 ]] && die "Usage: llm-ctx list [subdir]"
+        list_notes "${1:-}"
+        ;;
+      search)
+        [[ $# -ne 1 ]] && die "Usage: llm-ctx search <term>"
+        search_notes "$1"
+        ;;
+      skills)
+        [[ $# -ne 0 ]] && die "Usage: llm-ctx skills"
+        list_skills
+        ;;
+      *)
+        usage
+        exit 1
+        ;;
+    esac
+  }
+
+  # Copy-by-default only for content extractors.
+  local copy_default=0
+  case "$cmd" in
+    skill|snippet|section) copy_default=1 ;;
+    *) copy_default=0 ;;
+  esac
+
+  if [[ $to_stdout -eq 1 || $copy_default -eq 0 ]]; then
+    dispatch "$@"
+  else
+    dispatch "$@" | pb
+  fi
+}
+
+main "$@"

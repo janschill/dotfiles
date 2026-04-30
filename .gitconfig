@@ -1,0 +1,78 @@
+# https://blog.gitbutler.com/how-git-core-devs-configure-git/
+
+[branch]
+	sort = -committerdate
+
+[column]
+	ui = auto
+
+[commit]
+	verbose = true
+
+[core]
+	editor = nvim
+	fileMode = false
+	ignorecase = true
+
+[diff]
+	algorithm = histogram
+	colorMoved = plain
+	mnemonicPrefix = true
+	renames = true
+
+[fetch]
+	# Cleans up stuff that's gone on remote
+	prune = true
+	pruneTags = true
+	all = true
+
+[init]
+	defaultBranch = main
+
+[help]
+	autocorrect = prompt
+
+[merge]
+	conflictStyle = diff3
+
+[pull]
+	rebase = true
+
+[push]
+	default = simple
+	autoSetupRemote = true
+	# Pushes all tags to remote
+    #followTags = true
+
+[rebase]
+	autoStash = true
+	autoSquash = true
+	updateRefs = true
+
+[rerere]
+    enabled = true
+    autoupdate = true
+
+[tag]
+	# Treating dotted version numbers as a series of integer values
+	sort = version:refname
+
+[user]
+	email = janschill@proton.me
+	name = Jan
+
+# [delta]
+# 	minus-style = "#fdf6e3 #dc322f"
+# 	plus-style = "#fdf6e3 #859900"
+# 	side-by-side = false
+# 	syntax-theme = "solarized-dark"
+[includeIf "gitdir:~/code/vippsas/"]
+	path = ~/.config/git/work.gitconfig
+
+[alias]
+	rdiff = "!f() { \n  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null) || { \n    echo \"No upstream set for this branch.\"; \n    echo \"Set one with: git branch --set-upstream-to=origin/$(git branch --show-current)\"; \n    return 1; \n  }\n  git fetch --quiet ${upstream%%/*} || return 1\n  echo \"Comparing local $(git branch --show-current) to $upstream\"\n  echo\n  echo \"Ahead/Behind:\"\n  git rev-list --left-right --count $upstream...HEAD | awk '{print \\\"  Ahead: \\\"$2\\\"  Behind: \\\"$1}'\n  echo\n  if [ \"$1\" = \"--full\" ]; then\n    git diff $upstream\n  else\n    git diff --stat $upstream\n    echo\n    echo \"(Pass --full for full patch: git rdiff --full)\"\n  fi\n}; f"
+[filter "lfs"]
+	required = true
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process

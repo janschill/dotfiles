@@ -1,0 +1,55 @@
+alias ll='ls -al'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+alias dot='/usr/bin/git --git-dir=$HOME/.dotfiles --work-tree=$HOME'
+alias dot-work='/usr/bin/git --git-dir=$HOME/.dotfiles-work --work-tree=$HOME'
+
+alias n='nvim'
+alias vi='nvim'
+alias vim='nvim'
+
+#alias cat='bat'
+
+alias ip="curl ipinfo.io/ip; echo"
+alias localip="ipconfig getifaddr en0"
+
+# Enhanced Git aliases
+alias gl='git log --oneline --graph --decorate --all'
+alias gll='git log --graph --pretty=format:"%C(yellow)%h%C(reset) %C(blue)%ad%C(reset) %C(green)%an%C(reset) %s %C(red)%d%C(reset)" --date=short'
+alias gls='git log --stat --oneline'
+alias gd='git diff --color-words'
+alias gdc='git diff --cached --color-words'
+alias gds='git diff --stat'
+alias gdt='git difftool'
+alias gb='git branch -vv'
+alias gba='git branch -a -vv'
+alias gst='git status -sb'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+alias gcp='git cherry-pick'
+alias grb='git rebase'
+alias grbi='git rebase -i'
+alias gm='git merge --no-ff'
+alias gp='git push'
+alias gpu='git push -u origin HEAD'
+alias gpf='git push --force-with-lease'
+alias gpl='git pull'
+alias gf='git fetch'
+alias ga='git add'
+alias gaa='git add -A'
+alias gc='git commit'
+alias gcm='git commit -m'
+alias gca='git commit --amend'
+alias gcan='git commit --amend --no-edit'
+alias greset='git reset --hard HEAD~1'
+alias gundo='git reset --soft HEAD~1'
+alias gstash='git stash'
+alias gstashp='git stash pop'
+alias gshow='git show --stat'
+alias gwho='git shortlog -sn'
+alias gblame='git blame -w -C -C -C'
+
+alias lg='lazygit'
+
+alias cbranch='git branch --show-current'

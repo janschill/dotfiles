@@ -1,0 +1,75 @@
+[tools]
+"npm:cross-env" = "latest"
+air = "latest"
+go = "latest"
+node = "latest"
+python = "3.13"
+usage = "latest"
+uv = "latest"
+deno = "latest"
+rust = "latest"
+pipx = "latest"
+
+[settings]
+# Always activate global tools
+activate_aggressive = true
+# Use system versions when global not available
+not_found_auto_install = false
+# Enable legacy version files support
+legacy_version_file = true
+# Disable hints
+disable_hints = ["*"]
+idiomatic_version_file_enable_tools = ["node"]
+
+# Tasks for language setup
+[tasks.setup-node]
+description = "Setup Node.js global tools"
+run = [
+    "npm install -g typescript",
+    "npm install -g ts-node",
+    "npm install -g nodemon",
+    "npm install -g http-server",
+    "npm install -g prettier",
+    "npm install -g eslint",
+    "npm install -g yarn",
+    "npm install -g pnpm",
+    "npm install -g npm-check-updates",
+    "npm install -g serve"
+]
+
+[tasks.setup-python]
+description = "Setup Python global tools"
+run = [
+    "pip install --upgrade pip",
+    "pip install pipenv",
+    "pip install poetry",
+    "pip install black",
+    "pip install flake8",
+    "pip install isort",
+    "pip install mypy",
+    "pip install pytest",
+    "pip install jupyter",
+    "pip install ipython",
+    "pip install requests",
+    "pip install httpie"
+]
+
+[tasks.setup-go]
+description = "Setup Go global tools"
+run = [
+    "go install golang.org/x/tools/cmd/goimports@latest",
+    "go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest",
+    "go install github.com/air-verse/air@latest",
+    "go install github.com/pressly/goose/v3/cmd/goose@latest"
+]
+
+[tasks.setup-all]
+description = "Setup all language tools"
+depends = ["setup-node", "setup-python", "setup-go"]
+
+[tasks.update-tools]
+description = "Update all global tools"
+run = [
+    "npm update -g",
+    "go install golang.org/x/tools/cmd/goimports@latest"
+]

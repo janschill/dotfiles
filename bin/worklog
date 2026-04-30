@@ -1,0 +1,643 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# worklog — fetch GitHub activity into a daily markdown work log.
+#
+# Subcommands:
+#   worklog                              fetch yesterday (default)
+#   worklog fetch [DATE|today|yesterday] [END]   fetch a day or inclusive range
+#   worklog backfill <START_DATE|N>      one file per day, START..yesterday
+#                                        N = days back (e.g. 210 ≈ 7 months)
+#   worklog daemon-run                   wrapper for launchd; logs + notifies
+#   worklog install-daemon               install launchd plist
+#   worklog uninstall-daemon             remove launchd plist
+#   worklog status                       last-success time + tail of daemon log
+#   worklog config                       print effective config
+#   worklog help                         this message
+#
+# Config: ${XDG_CONFIG_HOME:-~/.config}/worklog/config (shell-sourced)
+#   WORKLOG_DIR             where to write markdown (default: ~/worklog)
+#   WORKLOG_ORG             filter to a single GitHub org (default: empty = all)
+#   WORKLOG_LOG_DIR         logs + heartbeat (default: ~/Library/Logs/worklog)
+#   WORKLOG_DAEMON_HOUR     daemon HH 0–23 (default: 9)
+#   WORKLOG_DAEMON_MINUTE   daemon MM 0–59 (default: 0)
+#   GH_USER                 GitHub login (default: from `gh api user`)
+#
+# Notes:
+# - PRs, issues, commits use server-side date filters via `gh search`; they
+#   keep working as long as the search index has them.
+# - The events API returns at most ~300 events / 90 days. Run daily so you
+#   don't lose timeline detail.
+# - Bodies of PRs, issues, comments and reviews are embedded as quoted snippets
+#   so the markdown stays useful even if you later lose access to the repo.
+
+VERSION="0.1.0"
+PLIST_LABEL="com.janschill.worklog"
+
+CONFIG_FILE="${WORKLOG_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/worklog/config}"
+PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+
+# ---------- config ----------
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+    fi
+    : "${WORKLOG_DIR:=$HOME/worklog}"
+    : "${WORKLOG_ORG:=}"
+    : "${WORKLOG_LOG_DIR:=$HOME/Library/Logs/worklog}"
+    : "${WORKLOG_DAEMON_HOUR:=9}"
+    : "${WORKLOG_DAEMON_MINUTE:=0}"
+    : "${GH_USER:=}"
+
+    if [[ -z "$GH_USER" ]]; then
+        GH_USER="$(gh api user --jq .login 2>/dev/null)" || {
+            echo "worklog: not authenticated. Run 'gh auth login'." >&2
+            exit 1
+        }
+    fi
+    mkdir -p "$WORKLOG_DIR" "$WORKLOG_LOG_DIR"
+}
+
+# ---------- date helpers ----------
+
+yday() { date -v -1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d; }
+today() { date +%Y-%m-%d; }
+day_after() {
+    date -j -v +1d -f "%Y-%m-%d" "$1" "+%Y-%m-%d" 2>/dev/null \
+        || date -d "$1 +1 day" +%Y-%m-%d
+}
+
+resolve_date() {
+    case "$1" in
+        yesterday|"") yday ;;
+        today)        today ;;
+        *)            echo "$1" ;;
+    esac
+}
+
+# ---------- gh helpers ----------
+
+gh_owner_args=()
+events_org_filter='.'
+
+build_gh_filters() {
+    if [[ -n "$WORKLOG_ORG" ]]; then
+        gh_owner_args=(--owner="$WORKLOG_ORG")
+        events_org_filter="select(.repo.name | startswith(\"${WORKLOG_ORG}/\"))"
+    else
+        gh_owner_args=()
+        events_org_filter="."
+    fi
+}
+
+# Reusable jq snippet: trim body to first paragraph, max N chars.
+read -r -d '' JQ_HELPERS <<'JQ' || true
+def snippet(n):
+  if . == null or . == "" then null
+  else
+    (gsub("\r\n"; "\n")) as $b
+    | ($b | split("\n\n") | .[0]) as $first
+    | if ($first | length) > n then $first[0:n] + "…" else $first end
+  end;
+
+def quote_body(n):
+  (snippet(n)) as $s
+  | if $s == null then "" else "\n" + ($s | split("\n") | map("  > " + .) | join("\n")) end;
+JQ
+
+# ---------- queries ----------
+
+q_pr_section() {
+    # $1 = author|reviewed-by; uses $RANGE
+    local kind="$1"
+    gh search prs "--${kind}=@me" --updated="$RANGE" "${gh_owner_args[@]}" \
+        --json url,title,state,number,repository,isDraft,body,author,createdAt \
+        --limit 100 \
+        --jq "$JQ_HELPERS"'
+            .[] |
+            "- [\(.repository.nameWithOwner)#\(.number)](\(.url)) **\(.state)**" +
+            (if .isDraft then " (draft)" else "" end) +
+            (if (.author.login // "") != "" and .author.login != "'"$GH_USER"'" then " by @\(.author.login)" else "" end) +
+            " — \(.title)" + (.body | quote_body(400))
+        '
+}
+
+q_issue_section() {
+    local kind="$1"
+    gh search issues "--${kind}=@me" --updated="$RANGE" "${gh_owner_args[@]}" \
+        --json url,title,state,number,repository,body,author \
+        --limit 100 \
+        --jq "$JQ_HELPERS"'
+            .[] |
+            "- [\(.repository.nameWithOwner)#\(.number)](\(.url)) **\(.state)**" +
+            (if (.author.login // "") != "" and .author.login != "'"$GH_USER"'" then " by @\(.author.login)" else "" end) +
+            " — \(.title)" + (.body | quote_body(400))
+        '
+}
+
+q_commits() {
+    gh search commits --author=@me --author-date="$RANGE" "${gh_owner_args[@]}" \
+        --json sha,commit,repository,url \
+        --limit 100 \
+        | jq -r --argjson multi "$MULTI_DAY_JSON" "$JQ_HELPERS"'
+            sort_by(.commit.author.date) | .[] |
+            (if $multi then .commit.author.date[5:16] | sub("T"; " ") else .commit.author.date[11:16] end) as $t |
+            (.commit.message | split("\n") | .[0]) as $subject |
+            (.commit.message | split("\n\n") | (if length > 1 then .[1:] | join("\n\n") else null end)) as $body |
+            "- `\(.sha[0:7])` `\($t)` [\(.repository.fullName)](\(.url)) — \($subject)" +
+            ($body | quote_body(300))
+        '
+}
+
+q_events() {
+    local from="${START_DATE}T00:00:00Z"
+    local to="${END_DATE}T23:59:59Z"
+
+    # Events API only returns the last ~300 events / ~90 days. Skip the call
+    # entirely for ranges that fall fully outside that window — it just wastes
+    # API quota.
+    local cutoff
+    cutoff=$(date -v -90d +%Y-%m-%d 2>/dev/null || date -d '90 days ago' +%Y-%m-%d)
+    if [[ "$END_DATE" < "$cutoff" ]]; then
+        return 0
+    fi
+
+    gh api "/users/${GH_USER}/events?per_page=100" --paginate \
+        --jq ".[] | select(.created_at >= \"$from\" and .created_at <= \"$to\") | $events_org_filter" \
+    | jq -sr --argjson multi "$MULTI_DAY_JSON" "$JQ_HELPERS"'
+        sort_by(.created_at) | .[] |
+        (if $multi then .created_at[5:16] | sub("T"; " ") else .created_at[11:16] end) as $t |
+        .repo.name as $repo |
+        ("https://github.com/" + $repo) as $repo_url |
+        if .type == "PushEvent" then
+            (.payload.ref | sub("refs/heads/"; "")) as $branch |
+            ("https://github.com/" + $repo + "/tree/" + $branch) as $branch_url |
+            ("https://github.com/" + $repo + "/compare/" + (.payload.before[0:12]) + "..." + (.payload.head[0:12])) as $compare_url |
+            "- `\($t)` push to **[\($repo)](\($repo_url))** [`\($branch)`](\($branch_url)) ([compare](\($compare_url)))"
+        elif .type == "PullRequestEvent" then
+            "- `\($t)` PR \(.payload.action) [\($repo)#\(.payload.pull_request.number)](https://github.com/\($repo)/pull/\(.payload.pull_request.number))"
+        elif .type == "PullRequestReviewEvent" then
+            "- `\($t)` review **\(.payload.review.state)** [\($repo)#\(.payload.pull_request.number)](\(.payload.review.html_url // "https://github.com/\($repo)/pull/\(.payload.pull_request.number)"))" +
+            ((.payload.review.body) | quote_body(300))
+        elif .type == "PullRequestReviewCommentEvent" then
+            "- `\($t)` review comment [\($repo)#\(.payload.pull_request.number)](\(.payload.comment.html_url // "https://github.com/\($repo)/pull/\(.payload.pull_request.number)"))" +
+            ((.payload.comment.body) | quote_body(300))
+        elif .type == "IssueCommentEvent" then
+            "- `\($t)` commented [\($repo)#\(.payload.issue.number)](\(.payload.comment.html_url // "https://github.com/\($repo)/issues/\(.payload.issue.number)"))" +
+            (if .payload.issue.title then " — \(.payload.issue.title)" else "" end) +
+            ((.payload.comment.body) | quote_body(300))
+        elif .type == "IssuesEvent" then
+            "- `\($t)` issue \(.payload.action) [\($repo)#\(.payload.issue.number)](\(.payload.issue.html_url // "https://github.com/\($repo)/issues/\(.payload.issue.number)"))" +
+            (if .payload.issue.title then " — \(.payload.issue.title)" else "" end) +
+            ((.payload.issue.body) | quote_body(300))
+        elif .type == "CreateEvent" then
+            (if .payload.ref_type == "branch" and .payload.ref then
+                ("https://github.com/" + $repo + "/tree/" + .payload.ref) as $u |
+                "- `\($t)` created branch [`\(.payload.ref)`](\($u)) in **[\($repo)](\($repo_url))**"
+             elif .payload.ref_type == "tag" and .payload.ref then
+                ("https://github.com/" + $repo + "/releases/tag/" + .payload.ref) as $u |
+                "- `\($t)` created tag [`\(.payload.ref)`](\($u)) in **[\($repo)](\($repo_url))**"
+             else
+                "- `\($t)` created \(.payload.ref_type) in **[\($repo)](\($repo_url))**"
+             end)
+        elif .type == "DeleteEvent" then
+            "- `\($t)` deleted \(.payload.ref_type) `\(.payload.ref)` in **[\($repo)](\($repo_url))**"
+        else empty end
+    '
+}
+
+q_repos_touched() {
+    # Combine repos from all sources we already have, dedupe, link.
+    {
+        printf '%s\n' "$PR_AUTH" "$PR_REVD" "$ISS_AUTH" "$ISS_COMM" \
+            | grep -oE '\[[^]]*#[0-9]+\]' \
+            | sed -E 's/\[([^/]+\/[^#]+)#[0-9]+\]/\1/'
+        printf '%s\n' "$COMMITS" \
+            | grep -oE '\[[^]]+\]\(https://github\.com/[^/]+/[^/]+/commit' \
+            | sed -E 's@\[([^]]+)\].*@\1@'
+        printf '%s\n' "$TIMELINE" \
+            | grep -oE '\*\*\[[^]]+\]\(https://github\.com/[^)]+\)\*\*' \
+            | sed -E 's@\*\*\[([^]]+)\].*@\1@'
+    } 2>/dev/null \
+        | sed '/^$/d' \
+        | sort -u \
+        | awk '{ print "- [" $0 "](https://github.com/" $0 ")" }'
+}
+
+# ---------- compose ----------
+
+count_lines() {
+    [[ -z "$1" ]] && echo 0 || printf '%s\n' "$1" | grep -c '^- '
+}
+
+write_section() {
+    local title="$1"
+    local content="$2"
+    echo "## $title"
+    echo
+    if [[ -z "$content" ]]; then
+        echo "_None_"
+    else
+        echo "$content"
+    fi
+    echo
+}
+
+# Replace the auto block (between worklog:auto:start/end markers) in $1 with
+# content from stdin. Manual content outside the markers is preserved. If the
+# file has no markers, the file is overwritten and seeded with markers + an
+# empty Notes section. If the file does not exist, it is created fresh.
+WORKLOG_MARK_START='<!-- worklog:auto:start -->'
+WORKLOG_MARK_END='<!-- worklog:auto:end -->'
+
+write_auto_block() {
+    local output="$1"
+    local new_block
+    new_block="$(mktemp)"
+    cat > "$new_block"
+
+    if [[ -f "$output" ]] && grep -qF "$WORKLOG_MARK_START" "$output" && grep -qF "$WORKLOG_MARK_END" "$output"; then
+        local merged
+        merged="$(mktemp)"
+        awk -v newfile="$new_block" \
+            -v start="$WORKLOG_MARK_START" \
+            -v end="$WORKLOG_MARK_END" '
+            index($0, start) {
+                while ((getline line < newfile) > 0) print line
+                close(newfile)
+                skipping = 1
+                next
+            }
+            skipping && index($0, end) {
+                skipping = 0
+                next
+            }
+            !skipping { print }
+        ' "$output" > "$merged"
+        mv "$merged" "$output"
+    else
+        if [[ -f "$output" ]]; then
+            echo "worklog: $output has no markers — overwriting (future runs will preserve manual edits)" >&2
+        fi
+        {
+            cat "$new_block"
+            echo
+            echo "## Notes"
+            echo
+        } > "$output"
+    fi
+
+    rm -f "$new_block"
+}
+
+# ---------- subcommand: fetch ----------
+
+cmd_fetch() {
+    load_config
+    build_gh_filters
+
+    local raw_start="${1:-yesterday}"
+    local raw_end="${2:-$raw_start}"
+    START_DATE="$(resolve_date "$raw_start")"
+    END_DATE="$(resolve_date "$raw_end")"
+
+    if [[ "$START_DATE" == "$END_DATE" ]]; then
+        LABEL="$START_DATE"
+        RANGE="$START_DATE"
+        MULTI_DAY_JSON="false"
+    else
+        LABEL="${START_DATE}_${END_DATE}"
+        RANGE="${START_DATE}..${END_DATE}"
+        MULTI_DAY_JSON="true"
+    fi
+
+    local output="${WORKLOG_DIR}/${LABEL}.md"
+    local org_label="${WORKLOG_ORG:-<all repos>}"
+
+    echo "worklog: fetching @${GH_USER} (${RANGE}, org=${org_label})" >&2
+
+    PR_AUTH="$(q_pr_section author        || true)"
+    PR_REVD="$(q_pr_section reviewed-by   || true)"
+    ISS_AUTH="$(q_issue_section author    || true)"
+    ISS_COMM="$(q_issue_section commenter || true)"
+    COMMITS="$(q_commits                  || true)"
+    TIMELINE="$(q_events 2>/dev/null      || true)"
+    REPOS="$(q_repos_touched              || true)"
+
+    local total=0
+    for s in "$PR_AUTH" "$PR_REVD" "$ISS_AUTH" "$ISS_COMM" "$COMMITS" "$TIMELINE"; do
+        total=$((total + $(count_lines "$s")))
+    done
+
+    if [[ "$total" -eq 0 ]]; then
+        echo "worklog: no activity for ${RANGE} (org=${org_label}) — skipping" >&2
+        # If a stale file exists from an earlier run, leave it (and any manual
+        # notes) alone.
+        return 0
+    fi
+
+    {
+        echo "$WORKLOG_MARK_START"
+        cat <<EOF
+# Work Log: ${LABEL}
+
+_Generated $(date '+%Y-%m-%d %H:%M:%S %Z') for @${GH_USER}${WORKLOG_ORG:+ (org: ${WORKLOG_ORG})}_
+
+## Summary
+
+- $(count_lines "$PR_AUTH") PRs authored
+- $(count_lines "$PR_REVD") PRs reviewed
+- $(count_lines "$ISS_AUTH") issues authored
+- $(count_lines "$ISS_COMM") issues commented
+- $(count_lines "$COMMITS") commits
+- $(count_lines "$TIMELINE") timeline events
+
+EOF
+
+        write_section "Repos Touched" "$REPOS"
+        write_section "Pull Requests Authored" "$PR_AUTH"
+        write_section "Pull Requests Reviewed" "$PR_REVD"
+        write_section "Issues Authored" "$ISS_AUTH"
+        write_section "Issues Commented" "$ISS_COMM"
+        write_section "Commits" "$COMMITS"
+        write_section "Activity Timeline" "$TIMELINE"
+        echo "$WORKLOG_MARK_END"
+    } | write_auto_block "$output"
+
+    echo "worklog: wrote ${output}" >&2
+}
+
+# ---------- subcommand: backfill ----------
+
+cmd_backfill() {
+    load_config
+    build_gh_filters
+
+    local arg="${1:-}"
+    if [[ -z "$arg" ]]; then
+        echo "Usage: worklog backfill <START_DATE|N>" >&2
+        echo "       N is days back from today (e.g. 210 for ~7 months)" >&2
+        return 1
+    fi
+
+    local start_date end_date
+    if [[ "$arg" =~ ^[0-9]+$ ]]; then
+        start_date=$(date -v -"$arg"d +%Y-%m-%d 2>/dev/null || date -d "$arg days ago" +%Y-%m-%d)
+    else
+        start_date="$arg"
+    fi
+    end_date="$(yday)"
+
+    if [[ "$start_date" > "$end_date" ]]; then
+        echo "worklog: start ($start_date) is after yesterday ($end_date)" >&2
+        return 1
+    fi
+
+    # Pre-compute total day count for progress display.
+    local total=0 d="$start_date"
+    while [[ "$d" < "$end_date" || "$d" == "$end_date" ]]; do
+        total=$((total + 1))
+        d=$(day_after "$d")
+    done
+
+    local cutoff
+    cutoff=$(date -v -90d +%Y-%m-%d 2>/dev/null || date -d '90 days ago' +%Y-%m-%d)
+
+    echo "worklog: backfill ${start_date} → ${end_date} (${total} days, org=${WORKLOG_ORG:-<all>})" >&2
+    echo "worklog: timeline events available for days >= ${cutoff} only" >&2
+
+    local i=0 created=0 empty=0 failed=0
+    d="$start_date"
+    while [[ "$d" < "$end_date" || "$d" == "$end_date" ]]; do
+        i=$((i + 1))
+        printf '[%d/%d] %s ' "$i" "$total" "$d" >&2
+        local before
+        before="$WORKLOG_DIR/${d}.md"
+        local before_mtime=""
+        [[ -f "$before" ]] && before_mtime=$(stat -f %m "$before" 2>/dev/null || stat -c %Y "$before" 2>/dev/null)
+
+        if cmd_fetch "$d" "$d" >/dev/null 2>&1; then
+            local after_mtime=""
+            [[ -f "$before" ]] && after_mtime=$(stat -f %m "$before" 2>/dev/null || stat -c %Y "$before" 2>/dev/null)
+            if [[ -f "$before" && "$before_mtime" != "$after_mtime" ]]; then
+                created=$((created + 1))
+                echo "wrote" >&2
+            else
+                empty=$((empty + 1))
+                echo "no activity" >&2
+            fi
+        else
+            failed=$((failed + 1))
+            echo "FAILED" >&2
+        fi
+
+        # Gentle pacing to avoid GitHub secondary rate limits on long runs.
+        sleep 0.3
+        d=$(day_after "$d")
+    done
+
+    echo "worklog: backfill done — wrote=${created} empty=${empty} failed=${failed} (of ${total})" >&2
+}
+
+# ---------- subcommand: daemon-run ----------
+
+cmd_daemon_run() {
+    load_config
+
+    local log_file="$WORKLOG_LOG_DIR/daemon.log"
+    local last_success="$WORKLOG_LOG_DIR/last-success"   # ISO timestamp; informational
+    local last_fetched="$WORKLOG_LOG_DIR/last-fetched"   # YYYY-MM-DD; daemon state
+    local end_date d
+    end_date="$(yday)"
+
+    {
+        echo
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S %Z') daemon-run ==="
+    } >> "$log_file"
+
+    # Determine starting day from `last-fetched` (the most recent date for
+    # which we attempted a fetch). `last-success` used to be misread as the
+    # last fetched date, but it's the run-timestamp — off by one. We now
+    # ignore it for state and only use it for display.
+    local last_day=""
+    if [[ -f "$last_fetched" ]]; then
+        last_day="$(tr -d '[:space:]' < "$last_fetched")"
+    fi
+    if [[ -n "$last_day" ]]; then
+        d="$(day_after "$last_day")"
+    else
+        d="$end_date"
+    fi
+
+    if [[ "$d" > "$end_date" ]]; then
+        echo "no new days to log (last_fetched=${last_day:-none}, end=$end_date)" >> "$log_file"
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$last_success"
+        return 0
+    fi
+
+    local fail=0 last_attempted=""
+    while [[ "$d" < "$end_date" || "$d" == "$end_date" ]]; do
+        if cmd_fetch "$d" "$d" >> "$log_file" 2>&1; then
+            last_attempted="$d"
+        else
+            fail=1
+            echo "FETCH FAILED for $d" >> "$log_file"
+        fi
+        d="$(day_after "$d")"
+    done
+
+    if [[ "$fail" -eq 0 ]]; then
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$last_success"
+        [[ -n "$last_attempted" ]] && echo "$last_attempted" > "$last_fetched"
+        return 0
+    else
+        local msg="worklog daemon failed — see $log_file"
+        echo "$msg" >> "$log_file"
+        osascript -e "display notification \"check $log_file\" with title \"worklog failed\" sound name \"Basso\"" 2>/dev/null || true
+        return 1
+    fi
+}
+
+# ---------- subcommand: install-daemon ----------
+
+cmd_install_daemon() {
+    load_config
+
+    local self
+    self="$(command -v worklog || echo "$HOME/bin/worklog")"
+    if [[ ! -x "$self" ]]; then
+        echo "worklog: cannot locate executable; expected $self" >&2
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$PLIST_PATH")"
+
+    cat > "$PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self}</string>
+        <string>daemon-run</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${WORKLOG_DAEMON_HOUR}</integer>
+        <key>Minute</key>
+        <integer>${WORKLOG_DAEMON_MINUTE}</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>${WORKLOG_LOG_DIR}/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>${WORKLOG_LOG_DIR}/launchd.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+</dict>
+</plist>
+EOF
+
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    launchctl load "$PLIST_PATH"
+    echo "worklog: installed launchd job at $PLIST_PATH"
+    echo "worklog: scheduled daily at ${WORKLOG_DAEMON_HOUR}:$(printf '%02d' "$WORKLOG_DAEMON_MINUTE")"
+}
+
+cmd_uninstall_daemon() {
+    if [[ -f "$PLIST_PATH" ]]; then
+        launchctl unload "$PLIST_PATH" 2>/dev/null || true
+        rm "$PLIST_PATH"
+        echo "worklog: removed $PLIST_PATH"
+    else
+        echo "worklog: no plist at $PLIST_PATH"
+    fi
+}
+
+# ---------- subcommand: status ----------
+
+cmd_status() {
+    load_config
+    echo "config:        $CONFIG_FILE"
+    echo "worklog dir:   $WORKLOG_DIR"
+    echo "log dir:       $WORKLOG_LOG_DIR"
+    echo "org filter:    ${WORKLOG_ORG:-<all repos>}"
+    echo "user:          @$GH_USER"
+    echo "schedule:      ${WORKLOG_DAEMON_HOUR}:$(printf '%02d' "$WORKLOG_DAEMON_MINUTE") daily"
+    if [[ -f "$PLIST_PATH" ]]; then
+        echo "daemon:        installed ($PLIST_PATH)"
+        if launchctl list "$PLIST_LABEL" >/dev/null 2>&1; then
+            echo "loaded:        yes"
+        else
+            echo "loaded:        no"
+        fi
+    else
+        echo "daemon:        not installed"
+    fi
+    if [[ -f "$WORKLOG_LOG_DIR/last-success" ]]; then
+        echo "last success:  $(cat "$WORKLOG_LOG_DIR/last-success")"
+    else
+        echo "last success:  never"
+    fi
+    if [[ -f "$WORKLOG_LOG_DIR/last-fetched" ]]; then
+        echo "last fetched:  $(cat "$WORKLOG_LOG_DIR/last-fetched")"
+    else
+        echo "last fetched:  never"
+    fi
+    if [[ -f "$WORKLOG_LOG_DIR/daemon.log" ]]; then
+        echo
+        echo "--- last 20 daemon log lines ---"
+        tail -n 20 "$WORKLOG_LOG_DIR/daemon.log"
+    fi
+}
+
+# ---------- subcommand: config ----------
+
+cmd_config() {
+    load_config
+    echo "# effective worklog config"
+    echo "WORKLOG_CONFIG=$CONFIG_FILE $([[ -f "$CONFIG_FILE" ]] && echo '# (loaded)' || echo '# (not found)')"
+    echo "WORKLOG_DIR=$WORKLOG_DIR"
+    echo "WORKLOG_ORG=${WORKLOG_ORG}"
+    echo "WORKLOG_LOG_DIR=$WORKLOG_LOG_DIR"
+    echo "WORKLOG_DAEMON_HOUR=$WORKLOG_DAEMON_HOUR"
+    echo "WORKLOG_DAEMON_MINUTE=$WORKLOG_DAEMON_MINUTE"
+    echo "GH_USER=$GH_USER"
+    echo "PLIST_LABEL=$PLIST_LABEL"
+    echo "PLIST_PATH=$PLIST_PATH"
+}
+
+# ---------- help ----------
+
+cmd_help() {
+    sed -n '3,/^$/p' "$0" | sed 's/^# \{0,1\}//;s/^#$//'
+}
+
+# ---------- dispatch ----------
+
+sub="${1:-fetch}"
+shift || true
+case "$sub" in
+    fetch)             cmd_fetch "$@" ;;
+    backfill)          cmd_backfill "$@" ;;
+    daemon-run)        cmd_daemon_run "$@" ;;
+    install-daemon)    cmd_install_daemon "$@" ;;
+    uninstall-daemon)  cmd_uninstall_daemon "$@" ;;
+    status)            cmd_status ;;
+    config)            cmd_config ;;
+    help|-h|--help)    cmd_help ;;
+    --version)         echo "worklog $VERSION" ;;
+    *)                 echo "worklog: unknown subcommand: $sub" >&2; cmd_help; exit 2 ;;
+esac

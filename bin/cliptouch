@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+if [ -z "$1" ]; then
+  echo "usage: cliptouch <file>" >&2
+  exit 2
+fi
+
+pbpaste > "$1"
+
+Optional hardening (if you want it):
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: cliptouch <file>" >&2
+  exit 2
+fi
+
+command -v pbpaste >/dev/null 2>&1 || { echo "pbpaste not found" >&2; exit 127; }
+
+pbpaste > "$1"

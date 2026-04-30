@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: Show current date/time with calendar
+
+usage() {
+  cat <<'EOF'
+rn — show current date/time with calendar
+
+Usage:
+  rn
+  rn --help
+
+Displays the current time, date, and a mini calendar
+with today's date highlighted.
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+date "+%l:%M%p on %A, %B %e, %Y"
+echo
+cal | grep -E "\b$(date '+%e')\b| "

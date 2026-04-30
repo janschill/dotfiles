@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: Print today's date (YYYY-MM-DD)
+
+usage() {
+  cat <<'EOF'
+hoy — print today's date
+
+Usage:
+  hoy
+  hoy --help
+
+Outputs the current date in YYYY-MM-DD format (no newline).
+Useful for filenames, logs, etc.
+
+Example:
+  touch "notes-$(hoy).md"
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+echo -n "$(date '+%Y-%m-%d')"

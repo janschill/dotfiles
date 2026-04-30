@@ -1,0 +1,119 @@
+#!/bin/bash
+
+# geo-traceroute - Geo-locate traceroute hops using ipinfo.io
+# Usage: geo-traceroute <host>
+#    or: traceroute <host> | geo-traceroute
+
+set -euo pipefail
+
+# ANSI colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Function to check if IP is private
+is_private_ip() {
+    local ip=$1
+    # Check for private IP ranges
+    if [[ $ip =~ ^10\. ]] || \
+       [[ $ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
+       [[ $ip =~ ^192\.168\. ]] || \
+       [[ $ip =~ ^127\. ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Function to get geo info
+get_geo_info() {
+    local ip=$1
+    local info
+
+    # Query ipinfo.io
+    info=$(curl -s "https://ipinfo.io/${ip}/json" 2>/dev/null)
+
+    if [ -z "$info" ]; then
+        echo "unknown"
+        return
+    fi
+
+    # Parse JSON (basic parsing, could use jq if available)
+    local city=$(echo "$info" | grep -o '"city":"[^"]*"' | cut -d'"' -f4)
+    local region=$(echo "$info" | grep -o '"region":"[^"]*"' | cut -d'"' -f4)
+    local country=$(echo "$info" | grep -o '"country":"[^"]*"' | cut -d'"' -f4)
+    local org=$(echo "$info" | grep -o '"org":"[^"]*"' | cut -d'"' -f4)
+
+    # Build location string
+    local location=""
+    [ -n "$city" ] && location="$city"
+    [ -n "$region" ] && [ "$region" != "$city" ] && location="${location:+$location, }$region"
+    [ -n "$country" ] && location="${location:+$location, }$country"
+    [ -z "$location" ] && location="unknown"
+
+    # Add org if available
+    if [ -n "$org" ]; then
+        echo "$location ($org)"
+    else
+        echo "$location"
+    fi
+}
+
+# Main processing function
+process_traceroute() {
+    echo -e "${CYAN}Hop  IP Address        Location${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local hop=0
+    local last_ip=""
+
+    while IFS= read -r line; do
+        # Skip header line
+        [[ "$line" =~ ^traceroute ]] && continue
+
+        # Extract hop number and IP
+        if [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*) ]]; then
+            hop="${BASH_REMATCH[1]}"
+            rest="${BASH_REMATCH[2]}"
+
+            # Extract IP address (looking for pattern like 1.2.3.4)
+            if [[ "$rest" =~ ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}) ]]; then
+                ip="${BASH_REMATCH[1]}"
+
+                # Skip if same as last hop (duplicate line)
+                if [ "$ip" = "$last_ip" ]; then
+                    continue
+                fi
+                last_ip="$ip"
+
+                # Format hop number
+                hop_fmt=$(printf "%-4s" "$hop")
+                ip_fmt=$(printf "%-17s" "$ip")
+
+                if is_private_ip "$ip"; then
+                    echo -e "${hop_fmt} ${ip_fmt} ${YELLOW}(private)${NC}"
+                else
+                    echo -ne "${hop_fmt} ${GREEN}${ip_fmt}${NC} "
+                    geo_info=$(get_geo_info "$ip")
+                    echo -e "${BLUE}${geo_info}${NC}"
+                fi
+            else
+                # No IP found (probably timeout)
+                hop_fmt=$(printf "%-4s" "$hop")
+                echo -e "${hop_fmt} ${RED}*${NC}"
+            fi
+        fi
+    done
+}
+
+# Main script logic
+if [ $# -gt 0 ]; then
+    # Arguments provided - run traceroute
+    echo -e "${CYAN}Running traceroute to $1...${NC}\n"
+    traceroute "$@" | process_traceroute
+else
+    # No arguments - read from stdin
+    process_traceroute
+fi

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: Start a local HTTP server (PHP/Python/Ruby)
+
+usage() {
+  cat <<'EOF'
+serveit — start a local HTTP server in the current directory
+
+Usage:
+  serveit [PORT]
+  serveit --help
+
+Arguments:
+  PORT   Port to listen on (default: 8000)
+
+Uses the first available: PHP, Python 3, or Ruby.
+
+Example:
+  serveit 3000
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+port="${1:-8000}"
+
+if hash php 2>/dev/null; then
+  exec php -S "localhost:$port"
+elif hash python3 2>/dev/null; then
+  exec python3 -m http.server "$port"
+elif hash ruby 2>/dev/null; then
+  exec ruby -run -e httpd . -p "$port"
+else
+  echo 'Error: No HTTP server available (need php, python3, or ruby)' >&2
+  exit 1
+fi

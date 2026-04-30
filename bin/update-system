@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: Update Homebrew, mas, npm, and other packages
+
+usage() {
+  cat <<'EOF'
+update-system — update system packages
+
+Usage:
+  update-system
+  update-system --help
+
+Updates all available package managers:
+  - Homebrew (brew)
+  - Mac App Store (mas)
+  - npm global packages
+  - Rust toolchain (rustup)
+
+Only runs updaters that are installed on your system.
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+echo "Updating system..."
+echo
+
+# Homebrew
+if command -v brew &>/dev/null; then
+  echo "==> Updating Homebrew..."
+  brew update
+  brew upgrade
+  brew cleanup
+  echo "Homebrew packages updated"
+  echo
+fi
+
+# Mac App Store (mas)
+if command -v mas &>/dev/null; then
+  echo "==> Updating Mac App Store apps..."
+  mas upgrade
+  echo "Mac App Store apps updated"
+  echo
+fi
+
+# npm global packages
+if command -v npm &>/dev/null; then
+  echo "==> Updating npm global packages..."
+  npm update -g
+  echo "npm global packages updated"
+  echo
+fi
+
+# Rust toolchain
+if command -v rustup &>/dev/null; then
+  echo "==> Updating Rust toolchain..."
+  rustup update
+  echo "Rust toolchain updated"
+  echo
+fi
+
+echo "System update completed"

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Description: List all personal tools in ~/bin with descriptions
+
+BIN_DIR="${HOME}/bin"
+
+usage() {
+  cat <<'EOF'
+my-tools — list all personal tools in ~/bin
+
+Usage:
+  my-tools
+  my-tools --help
+
+Scans ~/bin for executables and displays their descriptions.
+Each tool should have a "# Description:" comment to be listed.
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ ! -d "$BIN_DIR" ]]; then
+  echo "Error: $BIN_DIR does not exist" >&2
+  exit 1
+fi
+
+echo "Available tools in ~/bin:"
+echo
+
+# Find max name length for alignment
+max_len=0
+for file in "$BIN_DIR"/*; do
+  [[ -x "$file" && -f "$file" ]] || continue
+  name=$(basename "$file")
+  if (( ${#name} > max_len )); then
+    max_len=${#name}
+  fi
+done
+
+# List tools with descriptions
+for file in "$BIN_DIR"/*; do
+  [[ -x "$file" && -f "$file" ]] || continue
+
+  name=$(basename "$file")
+
+  # Extract description from "# Description:" or "// Description:" comment
+  desc=$(grep -m1 -E '^#[[:space:]]*Description:|^//[[:space:]]*Description:' "$file" 2>/dev/null \
+    | sed -E 's/^#[[:space:]]*Description:[[:space:]]*//; s|^//[[:space:]]*Description:[[:space:]]*||' || true)
+
+  if [[ -z "$desc" ]]; then
+    desc="(no description)"
+  fi
+
+  printf "  %-${max_len}s  %s\n" "$name" "$desc"
+done
+
+echo
+echo "Run <command> --help for details."

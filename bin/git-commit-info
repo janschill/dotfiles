@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Show commit and PR details for a git SHA.
+# Resolves locally first, falls back to GitHub API via gh.
+#
+# Usage:
+#   git-commit-info <sha|version-tag>
+#   git-commit-info --repo owner/repo <sha>
+#   git-commit-info --repo-from-image <image> <sha>
+#   echo "afaa004" | git-commit-info
+
+bold='\033[1m'  dim='\033[2m'  reset='\033[0m'
+cyan='\033[36m' green='\033[32m' red='\033[31m'
+
+repo=""
+image=""
+mode="full"
+sha=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)            repo="$2";  shift 2 ;;
+    --repo-from-image) image="$2"; shift 2 ;;
+    --compact)         mode="compact"; shift ;;
+    --full)            mode="full";    shift ;;
+    -h|--help)
+      cat <<EOF
+Usage: git-commit-info [OPTIONS] <sha|version-tag>
+
+Show commit and PR details for a git SHA.
+
+Options:
+  --repo SLUG             GitHub repo slug (e.g. owner/repo)
+  --repo-from-image IMG   Infer repo slug from container image name
+  --compact               One-line summary
+  --full                  Detailed view with PR description (default)
+
+The SHA can also be piped via stdin.
+Accepts version tags like "20260327-afaa004" (date prefix is stripped).
+EOF
+      exit 0 ;;
+    -*) echo "Unknown option: $1" >&2; exit 1 ;;
+    *)  sha="$1"; shift ;;
+  esac
+done
+
+# Read from stdin if no positional arg
+if [[ -z "$sha" ]]; then
+  read -r sha || true
+fi
+
+if [[ -z "$sha" ]]; then
+  echo "No SHA provided." >&2
+  exit 1
+fi
+
+# Strip date prefix from version tags like "20260327-afaa004"
+if [[ "$sha" == *-* ]]; then
+  sha="${sha##*-}"
+fi
+
+# --- resolve repo slug --------------------------------------------------------
+
+image_to_repo_slug() {
+  local img="$1"
+  if [[ "$img" =~ /([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)[:|@] ]]; then
+    echo "${BASH_REMATCH[1]}"
+  fi
+}
+
+relative_time() {
+  local ts="$1" now epoch diff
+  now=$(date +%s)
+  epoch=$(date -jf '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s 2>/dev/null \
+    || date -jf '%Y-%m-%d %H:%M:%S %z' "$ts" +%s 2>/dev/null \
+    || echo "")
+  [[ -z "$epoch" ]] && echo "$ts" && return
+  diff=$(( now - epoch ))
+  if   (( diff < 60 ));    then echo "${diff}s ago"
+  elif (( diff < 3600 ));  then echo "$(( diff/60 ))m ago"
+  elif (( diff < 86400 )); then echo "$(( diff/3600 ))h ago"
+  else echo "$(( diff/86400 ))d ago"
+  fi
+}
+
+# Try to determine the repo slug
+use_git=false
+source_slug=""
+
+if [[ -n "$repo" ]]; then
+  source_slug="$repo"
+fi
+
+# Try local git first
+git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n "$git_root" ]]; then
+  local_slug=$(git -C "$git_root" remote get-url origin 2>/dev/null \
+    | sed -E 's#.*github\.com[:/]##; s#\.git$##')
+
+  if git -C "$git_root" cat-file -e "$sha" 2>/dev/null; then
+    use_git=true
+    [[ -z "$source_slug" ]] && source_slug="$local_slug"
+  fi
+fi
+
+# Infer from image if commit not found locally
+if ! $use_git && [[ -n "$image" && -z "$source_slug" ]]; then
+  source_slug=$(image_to_repo_slug "$image")
+fi
+
+# Last resort: use local repo slug
+if [[ -z "$source_slug" ]]; then
+  if [[ -n "$local_slug" ]]; then
+    source_slug="$local_slug"
+  else
+    echo "Cannot determine repo. Use --repo or --repo-from-image." >&2
+    exit 1
+  fi
+fi
+
+# If slug differs from local, note it
+cross_repo=false
+if [[ -n "$local_slug" && "$source_slug" != "$local_slug" ]]; then
+  cross_repo=true
+fi
+
+# --- fetch commit info --------------------------------------------------------
+
+full_sha="" subject="" author="" date_raw="" age="" body=""
+
+if $use_git && ! $cross_repo; then
+  cd "$git_root"
+  full_sha=$(git rev-parse "$sha")
+  subject=$(git log --format='%s' -1 "$sha")
+  author=$(git log --format='%an' -1 "$sha")
+  date_raw=$(git log --format='%ci' -1 "$sha")
+  age=$(relative_time "$(git log --format='%aI' -1 "$sha" | sed 's/+.*/Z/')" 2>/dev/null || echo "${date_raw%% *}")
+  body=$(git log --format='%b' -1 "$sha" | head -5)
+elif command -v gh &>/dev/null; then
+  commit_json=$(gh api "repos/$source_slug/commits/$sha" \
+    --jq '{sha: .sha, message: .commit.message, author: .commit.author.name, date: .commit.author.date}' 2>/dev/null || true)
+  if [[ -z "$commit_json" ]]; then
+    echo "Could not resolve commit $sha in $source_slug" >&2
+    exit 1
+  fi
+  full_sha=$(echo "$commit_json" | jq -r '.sha // empty')
+  if [[ -z "$full_sha" ]]; then
+    if [[ "$mode" == "compact" ]]; then
+      echo -e "  ${dim}Could not resolve $sha in $source_slug${reset}"
+      exit 0
+    fi
+    echo "Could not resolve commit $sha in $source_slug" >&2
+    exit 1
+  fi
+  subject=$(echo "$commit_json" | jq -r '.message // empty' | head -1)
+  body=$(echo "$commit_json" | jq -r '.message // empty' | tail -n +2 | head -5)
+  author=$(echo "$commit_json" | jq -r '.author // empty')
+  date_raw=$(echo "$commit_json" | jq -r '.date // empty')
+  age=$(relative_time "$date_raw" 2>/dev/null || echo "$date_raw")
+else
+  if [[ "$mode" == "compact" ]]; then
+    echo -e "  ${dim}Commit $sha not found${reset}"
+    exit 0
+  fi
+  echo "Commit $sha not in local repo (install gh CLI for remote lookup)." >&2
+  exit 1
+fi
+
+commit_url="https://github.com/$source_slug/commit/$full_sha"
+
+# --- PR lookup ----------------------------------------------------------------
+
+pr_number=""
+if [[ "$subject" =~ \#([0-9]+) ]]; then
+  pr_number="${BASH_REMATCH[1]}"
+elif command -v gh &>/dev/null; then
+  pr_number=$(gh api "repos/$source_slug/commits/${full_sha:-$sha}/pulls" \
+    --jq '.[0].number // empty' 2>/dev/null || true)
+fi
+
+pr_url=""
+[[ -n "$pr_number" ]] && pr_url="https://github.com/$source_slug/pull/$pr_number"
+
+# --- output -------------------------------------------------------------------
+
+if [[ "$mode" == "compact" ]]; then
+  $cross_repo && echo -e "  ${dim}(from ${source_slug})${reset}"
+  echo -e "  ${dim}${subject}${reset}"
+  echo -e "  ${dim}${author}, ${age}${reset}"
+  echo -e "  ${cyan}${commit_url}${reset}"
+  [[ -n "$pr_url" ]] && echo -e "  ${cyan}${pr_url}${reset}"
+  exit 0
+fi
+
+# ---- full mode ----
+$cross_repo && echo -e "${dim}(from ${source_slug})${reset}"
+echo
+echo -e "${bold}Commit${reset}"
+echo -e "  ${subject}"
+[[ -n "$body" ]] && echo -e "  ${dim}${body}${reset}"
+echo -e "  Author:   ${author}"
+echo -e "  Date:     ${date_raw}  (${age})"
+echo -e "  ${cyan}${commit_url}${reset}"
+
+if [[ -n "$pr_number" ]] && command -v gh &>/dev/null; then
+  pr_json=$(gh pr view "$pr_number" --repo "$source_slug" \
+    --json title,body,author,mergedAt,labels,changedFiles,additions,deletions 2>/dev/null || true)
+
+  echo
+  echo -e "${bold}Pull Request #${pr_number}${reset}"
+  echo -e "  ${cyan}${pr_url}${reset}"
+
+  if [[ -n "$pr_json" ]]; then
+    pr_title=$(echo "$pr_json" | jq -r '.title // empty')
+    pr_author=$(echo "$pr_json" | jq -r '.author.login // empty')
+    pr_merged=$(echo "$pr_json" | jq -r '.mergedAt // empty')
+    pr_body=$(echo "$pr_json" | jq -r '.body // empty')
+    pr_files=$(echo "$pr_json" | jq -r '.changedFiles // 0')
+    pr_adds=$(echo "$pr_json" | jq -r '.additions // 0')
+    pr_dels=$(echo "$pr_json" | jq -r '.deletions // 0')
+    pr_labels=$(echo "$pr_json" | jq -r '[.labels[].name] | join(", ") // empty')
+
+    echo -e "  ${pr_title}"
+    echo -e "  Author:   ${pr_author}"
+    if [[ -n "$pr_merged" && "$pr_merged" != "null" ]]; then
+      merge_age=$(relative_time "$pr_merged" 2>/dev/null || echo "$pr_merged")
+      echo -e "  Merged:   ${pr_merged}  (${merge_age})"
+    fi
+    echo -e "  Changed:  ${green}+${pr_adds}${reset} ${red}-${pr_dels}${reset} in ${pr_files} files"
+    [[ -n "$pr_labels" ]] && echo -e "  Labels:   ${pr_labels}"
+
+    if [[ -n "$pr_body" && "$pr_body" != "null" ]]; then
+      echo
+      echo -e "${bold}PR Description${reset}"
+      echo "$pr_body" | head -20 | sed 's/^/  /'
+      total_lines=$(echo "$pr_body" | wc -l | tr -d ' ')
+      if (( total_lines > 20 )); then
+        echo -e "  ${dim}... (${total_lines} lines total — see link)${reset}"
+      fi
+    fi
+  fi
+elif [[ -n "$pr_url" ]]; then
+  echo
+  echo -e "${bold}Pull Request #${pr_number}${reset}"
+  echo -e "  ${cyan}${pr_url}${reset}"
+  echo -e "  ${dim}(install gh CLI for PR details)${reset}"
+fi
