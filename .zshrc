@@ -1,7 +1,15 @@
 autoload -U colors && colors
-autoload -Uz compinit && compinit
+autoload -Uz compinit
 
-source <(fzf --zsh)
+# The following line has been added by Docker Desktop to enable Docker CLI completions.
+fpath=($HOME/.docker/completions $fpath)
+# End of Docker CLI completions
+
+compinit
+
+if command -v fzf >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
+  source <(fzf --zsh)
+fi
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
@@ -23,14 +31,6 @@ file=~/secret/bash.sh
 file=~/.zshrc.local
 [ -f $file ] && source $file
 
-eval "$(mise activate zsh)"
-
-# The following lines have been added by Docker Desktop to enable Docker CLI completions.
-fpath=($HOME/.docker/completions $fpath)
-autoload -Uz compinit
-compinit
-# End of Docker CLI completions
-
 if command -v zoxide &> /dev/null; then
   [[ -o interactive ]] && eval "$(zoxide init zsh --cmd cd)"
 fi
@@ -46,3 +46,5 @@ export BUN_INSTALL="$HOME/.bun"
 export PATH="$BUN_INSTALL/bin:$PATH"
 
 alias claude-mem='$HOME/.bun/bin/bun "$HOME/.claude/plugins/marketplaces/thedotmack/plugin/scripts/worker-service.cjs"'
+
+eval "$(mise activate zsh)"

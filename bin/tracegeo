@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # geo-traceroute - Geo-locate traceroute hops using ipinfo.io
 # Usage: geo-traceroute <host>
