@@ -66,7 +66,7 @@
 # 	plus-style = "#fdf6e3 #859900"
 # 	side-by-side = false
 # 	syntax-theme = "solarized-dark"
-[includeIf "gitdir:~/code/vippsas/"]
+[includeIf "gitdir:~/code/vippsas/**"]
 	path = ~/.config/git/work.gitconfig
 
 [alias]
