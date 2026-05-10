@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# clipvid — clip a YouTube video into your Obsidian vault as a Clippings note.
+#
+# Dependencies: yt-dlp, getsubs, jq
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+clipvid — clip a YouTube video into your Obsidian vault
+
+Usage:
+  clipvid <youtube-url>
+  clipvid --vault DIR <youtube-url>
+  clipvid --print <youtube-url>
+  clipvid --help
+
+Config:
+  ~/.config/clipvid/config.toml
+    vault = "/path/to/Obsidian/vault"
+
+Writes <vault>/Clippings/<title>.md with YAML frontmatter, an Obsidian
+video embed, the YouTube description, and the transcript.
+
+Dependencies: yt-dlp, getsubs, jq
+EOF
+}
+
+die() { echo "clipvid: $*" >&2; exit 1; }
+
+vault_override=""
+print_only=0
+url=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --print) print_only=1; shift ;;
+    --vault) [[ $# -ge 2 ]] || die "--vault requires a path"; vault_override="$2"; shift 2 ;;
+    --vault=*) vault_override="${1#--vault=}"; shift ;;
+    --) shift; url="${1:-}"; break ;;
+    -*) die "unknown flag: $1" ;;
+    *) [[ -z "$url" ]] || die "unexpected argument: $1"; url="$1"; shift ;;
+  esac
+done
+
+[[ -n "$url" ]] || { usage >&2; exit 2; }
+
+for dep in yt-dlp getsubs jq; do
+  command -v "$dep" >/dev/null 2>&1 || die "missing dependency: $dep"
+done
+
+expand_home() {
+  local p="$1"
+  if [[ "$p" == "~/"* ]]; then
+    printf '%s/%s' "$HOME" "${p#~/}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+resolve_vault() {
+  if [[ -n "$vault_override" ]]; then
+    expand_home "$vault_override"
+    return
+  fi
+  local cfg="$HOME/.config/clipvid/config.toml"
+  if [[ ! -f "$cfg" ]]; then
+    die "no vault configured. Create $cfg with:
+  vault = \"/path/to/your/Obsidian/vault\"
+Or pass --vault DIR"
+  fi
+  local v
+  v=$(grep -E '^[[:space:]]*vault[[:space:]]*=[[:space:]]*"[^"]*"' "$cfg" \
+      | head -n1 \
+      | sed -E 's/^[[:space:]]*vault[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
+  [[ -n "$v" ]] || die "$cfg has no \`vault\` key"
+  expand_home "$v"
+}
+
+# JSON-encode a string for safe embedding inside a YAML double-quoted scalar.
+yj() { jq -rn --arg s "$1" '$s | @json'; }
+
+slugify() {
+  tr -d '\\/:*?"<>|' \
+    | tr '\n' ' ' \
+    | tr -s '[:space:]' ' ' \
+    | sed -E 's/^ +//; s/ +$//'
+}
+
+# Join lines within a paragraph with spaces; keep blank lines as paragraph breaks.
+reflow_transcript() {
+  awk '
+    BEGIN { p = ""; printed = 0 }
+    /^$/ {
+      if (p) { print p; p = ""; printed = 1 }
+      blank = 1
+      next
+    }
+    {
+      if (blank && printed) print ""
+      blank = 0
+      p = (p ? p " " $0 : $0)
+    }
+    END { if (p) print p }
+  '
+}
+
+unique_path() {
+  local dir="$1" base="$2"
+  local out="$dir/$base.md"
+  local n=2
+  while [[ -e "$out" ]]; do
+    out="$dir/$base ($n).md"
+    n=$((n + 1))
+  done
+  printf '%s' "$out"
+}
+
+meta=$(yt-dlp -J --no-warnings "$url") || die "yt-dlp failed"
+transcript=$(getsubs "$url" | reflow_transcript) || die "getsubs failed"
+
+title=$(jq -r '.title // ""' <<<"$meta")
+source_url=$(jq -r '.webpage_url // ""' <<<"$meta")
+author=$(jq -r '.channel // .uploader // ""' <<<"$meta")
+upload_date=$(jq -r '.upload_date // ""' <<<"$meta")
+description=$(jq -r '.description // ""' <<<"$meta")
+
+published=""
+if [[ ${#upload_date} -eq 8 ]]; then
+  published="${upload_date:0:4}-${upload_date:4:2}-${upload_date:6:2}"
+fi
+created=$(date +%Y-%m-%d)
+
+desc_first_line=$(printf '%s\n' "$description" | sed -n '1p')
+if [[ ${#desc_first_line} -gt 200 ]]; then
+  desc_first_line="${desc_first_line:0:200}…"
+fi
+
+render_note() {
+  printf -- '---\n'
+  printf 'title: %s\n' "$(yj "$title")"
+  printf 'source: %s\n' "$(yj "$source_url")"
+  printf 'author:\n'
+  printf '  - %s\n' "$(yj "[[$author]]")"
+  if [[ -n "$published" ]]; then
+    printf 'published: %s\n' "$published"
+  fi
+  printf 'created: %s\n' "$created"
+  printf 'description: %s\n' "$(yj "$desc_first_line")"
+  printf 'tags:\n'
+  printf '  - "clippings"\n'
+  printf -- '---\n\n'
+  printf '![](%s)\n\n' "$source_url"
+  if [[ -n "$(printf '%s' "$description" | tr -d '[:space:]')" ]]; then
+    printf '## Description\n\n%s\n\n' "$description"
+  fi
+  printf '## Transcript\n\n%s\n' "$transcript"
+}
+
+note=$(render_note)
+
+if [[ "$print_only" -eq 1 ]]; then
+  printf '%s' "$note"
+  exit 0
+fi
+
+vault=$(resolve_vault)
+dir="$vault/Clippings"
+mkdir -p "$dir"
+
+base=$(printf '%s' "$title" | slugify)
+[[ -n "$base" ]] || base="video"
+
+out_path=$(unique_path "$dir" "$base")
+printf '%s' "$note" > "$out_path"
+printf '%s\n' "$out_path"

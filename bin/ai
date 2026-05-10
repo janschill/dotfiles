@@ -365,7 +365,7 @@ run_codex() {
         exit 0
     fi
 
-    read -r -a CODEX_FLAGS <<< "${AI_CODEX_FLAGS:---sandbox read-only --ask-for-approval never}"
+    read -r -a CODEX_FLAGS <<< "${AI_CODEX_FLAGS:---sandbox read-only}"
     if [[ -n "$model" ]]; then
         CODEX_FLAGS+=(--model "$model")
     fi
