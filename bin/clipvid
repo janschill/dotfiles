@@ -166,7 +166,7 @@ if [[ "$print_only" -eq 1 ]]; then
 fi
 
 vault=$(resolve_vault)
-dir="$vault/Clippings"
+dir="$vault/clippings/raw"
 mkdir -p "$dir"
 
 base=$(printf '%s' "$title" | slugify)
