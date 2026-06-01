@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_name=$(basename "$0")
+date_append=true
+space_char="-"
+dry_run=false
+
+usage() {
+    cat <<EOF
+Usage: $script_name [OPTIONS]
+
+Rename files in the current directory following Harvard-style naming conventions:
+  • lowercase only
+  • no spaces (replaced with hyphens or underscores)
+  • umlaute transliterated (ä→ae, ö→oe, ü→ue, æ→ae, ø→oe, å→aa, ß→ss)
+  • no special characters (replaced with hyphens, sequences collapsed)
+  • ISO date (yyyy-mm-dd) prepended by default
+
+Options:
+  -x, --exclude-date      Do not prepend the ISO date
+  -d, --date              Prepend the ISO date (default)
+  -u, --underscores       Replace spaces with underscores instead of hyphens
+  -n, --dry-run           Show what would be renamed without changing anything
+  -h, --help              Show this help message
+
+Examples:
+  $script_name
+  $script_name --exclude-date --dry-run
+  $script_name --exclude-date -u
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -x|--exclude-date)
+            date_append=false
+            shift
+            ;;
+        -d|--date)
+            date_append=true
+            shift
+            ;;
+        -u|--underscores)
+            space_char="_"
+            shift
+            ;;
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'Error: unknown option "%s"\n' "$1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+today=$(date +%Y-%m-%d)
+
+sanitize() {
+    local file_name="$1"
+    local extension stem new_name existing_date=""
+
+    # Preserve hidden files with no extension (e.g. .bashrc) as a single stem.
+    if [[ "$file_name" =~ ^\.[^.]+$ ]]; then
+        extension=""
+        stem="$file_name"
+    elif [[ "$file_name" =~ \. ]]; then
+        extension="${file_name##*.}"
+        stem="${file_name%.*}"
+    else
+        extension=""
+        stem="$file_name"
+    fi
+
+    # Detect any existing ISO date (yyyy-mm-dd) bounded by separators.
+    if [[ "$stem" =~ (^|[[:punct:][:space:]_])([12][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))($|[[:punct:][:space:]_]) ]]; then
+        existing_date="${BASH_REMATCH[2]}"
+    fi
+
+    # Strip the detected date, transliterate accents, and clean special chars.
+    stem=$(printf '%s' "$stem" | perl -CSD -pe '
+        use utf8;
+        BEGIN { binmode(STDIN, ":utf8"); binmode(STDOUT, ":utf8"); }
+        $_ = lc $_;
+        s/(?:^|(?<=[ _-]))(\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:(?=[ _-])|$)//g;
+        s/^[ _-]+//;
+        s/[ _-]+$//;
+        s/ä/ae/g;  s/æ/ae/g;
+        s/ö/oe/g;  s/ø/oe/g;
+        s/ü/ue/g;
+        s/å/aa/g;
+        s/ß/ss/g;
+        s/ /'"$space_char"'/g;
+        s/[^a-z0-9_-]/-/g;
+        s/-+/-/g;
+        s/^-//;
+        s/-$//;
+    ')
+
+    # Avoid empty stems.
+    if [[ -z "$stem" ]]; then
+        stem="untitled"
+    fi
+
+    # Lowercase extension.
+    extension=$(printf '%s' "$extension" | tr '[:upper:]' '[:lower:]')
+
+    # Prepend date: prefer existing date, otherwise today.
+    if [[ "$date_append" == true ]]; then
+        stem="${existing_date:-$today}-${stem}"
+    fi
+
+    if [[ -n "$extension" ]]; then
+        new_name="${stem}.${extension}"
+    else
+        new_name="$stem"
+    fi
+
+    printf '%s' "$new_name"
+}
+
+for file in *; do
+    # Skip non-regular files.
+    [[ -f "$file" ]] || continue
+    # Skip the script itself if it happens to be in cwd.
+    [[ "$file" == "$script_name" ]] && continue
+
+    new_file=$(sanitize "$file")
+
+    if [[ "$file" == "$new_file" ]]; then
+        continue
+    fi
+
+    if [[ -e "$new_file" ]]; then
+        printf 'Skipping "%s": target "%s" already exists\n' "$file" "$new_file" >&2
+        continue
+    fi
+
+    if [[ "$dry_run" == true ]]; then
+        printf '"%s" -> "%s"\n' "$file" "$new_file"
+    else
+        mv -- "$file" "$new_file"
+        printf '"%s" -> "%s"\n' "$file" "$new_file"
+    fi
+done
