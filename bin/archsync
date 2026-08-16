@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+#
+# archsync — reusable archive management: checksum, verify, copy, dedupe, freshness
+#
+# USAGE
+#   archsync checksum <dir>
+#   archsync verify   <dir>
+#   archsync copy     <src> -d <dest> [-d <dest2> ...] [--verify]
+#   archsync dedupe   <dir>
+#   archsync freshness <dir> [--max-age-days N]
+#   archsync sync     <src> -d <dest> [-d <dest2> ...]
+#
+# EXAMPLES
+#   archsync checksum ~/samla/raw/spotify/2026-08-16
+#   archsync verify   /Volumes/samla-archive/raw/spotify/2026-08-16
+#   archsync copy     ~/samla/raw -d /Volumes/samla-archive/raw -d /Volumes/nas-backup/raw --verify
+#   archsync dedupe   ~/samla/raw
+#   archsync freshness ~/samla/raw/netflix --max-age-days 30
+#   archsync sync     ~/samla/raw -d /Volumes/samla-archive/raw -d /Volumes/nas-backup/raw
+#
+# Manifest file name written inside a checksummed directory tree.
+MANIFEST_NAME=".checksums.sha256"
+
+set -euo pipefail
+
+# ---- tool detection -----------------------------------------------------
+
+if command -v shasum >/dev/null 2>&1; then
+    SHA_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    SHA_CMD="sha256sum"
+else
+    echo "Error: neither shasum nor sha256sum found." >&2
+    exit 1
+fi
+
+require_rsync() {
+    if ! command -v rsync >/dev/null 2>&1; then
+        echo "Error: rsync is required for copy/sync." >&2
+        exit 1
+    fi
+}
+
+usage() {
+    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+}
+
+# ---- checksum / verify ---------------------------------------------------
+
+cmd_checksum() {
+    local dir="$1"
+    [[ -d "$dir" ]] || { echo "Error: '$dir' is not a directory." >&2; exit 1; }
+
+    local manifest="$dir/$MANIFEST_NAME"
+    echo "Generating checksums for: $dir"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    (
+        cd "$dir"
+        find . -type f ! -name "$MANIFEST_NAME" -print0 \
+            | sort -z \
+            | xargs -0 $SHA_CMD
+    ) > "$tmpfile"
+    mv "$tmpfile" "$manifest"
+
+    local count
+    count=$(wc -l < "$manifest" | tr -d ' ')
+    echo "  -> wrote $manifest ($count files)"
+}
+
+cmd_verify() {
+    local dir="$1"
+    local manifest="$dir/$MANIFEST_NAME"
+    [[ -f "$manifest" ]] || { echo "Error: no manifest ($MANIFEST_NAME) found in $dir" >&2; exit 1; }
+
+    echo "Verifying: $dir"
+    (
+        cd "$dir"
+        if $SHA_CMD -c "$MANIFEST_NAME" --quiet; then
+            echo "  -> OK"
+        else
+            echo "  -> MISMATCH DETECTED"
+            exit 1
+        fi
+    )
+}
+
+# ---- copy / sync ----------------------------------------------------------
+
+cmd_copy() {
+    require_rsync
+    local src="$1"; shift
+    local -a dests=()
+    local do_verify=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d) dests+=("$2"); shift 2 ;;
+            --verify) do_verify=1; shift ;;
+            *) echo "Unknown option: $1" >&2; usage ;;
+        esac
+    done
+
+    [[ ${#dests[@]} -ge 1 ]] || { echo "Error: provide at least one -d <dest>" >&2; exit 1; }
+    [[ -d "$src" ]] || { echo "Error: source '$src' is not a directory." >&2; exit 1; }
+
+    # trailing slash on src so rsync copies contents, not the dir itself
+    local src_trailed="${src%/}/"
+
+    for dest in "${dests[@]}"; do
+        mkdir -p "$dest"
+        echo "Copying $src -> $dest"
+        rsync -a --info=progress2 --checksum "$src_trailed" "$dest/"
+
+        if [[ $do_verify -eq 1 ]]; then
+            if [[ -f "$src/$MANIFEST_NAME" ]]; then
+                echo "Verifying copy at $dest against source manifest..."
+                cmd_verify "$dest"
+            else
+                echo "No manifest at source ($src) — generating one now, then verifying copy."
+                cmd_checksum "$src"
+                rsync -a "$src/$MANIFEST_NAME" "$dest/$MANIFEST_NAME"
+                cmd_verify "$dest"
+            fi
+        fi
+    done
+}
+
+cmd_sync() {
+    local src="$1"; shift
+    echo "== sync: checksum source =="
+    cmd_checksum "$src"
+    echo "== sync: copy + verify to all destinations =="
+    cmd_copy "$src" "$@" --verify
+}
+
+# ---- dedupe ----------------------------------------------------------------
+
+cmd_dedupe() {
+    local dir="$1"
+    [[ -d "$dir" ]] || { echo "Error: '$dir' is not a directory." >&2; exit 1; }
+
+    echo "Scanning for duplicate files in: $dir"
+    (
+        cd "$dir"
+        find . -type f ! -name "$MANIFEST_NAME" -print0 \
+            | xargs -0 $SHA_CMD \
+            | awk '{ hash=$1; $1=""; sub(/^ /,""); print hash, $0 }' \
+            | sort \
+            | awk '
+                {
+                    if ($1 == prev_hash) {
+                        if (!printed_group) {
+                            print "Duplicate set (hash " prev_hash "):"
+                            print "  " prev_line
+                            printed_group = 1
+                        }
+                        print "  " substr($0, length($1)+2)
+                    } else {
+                        printed_group = 0
+                    }
+                    prev_hash = $1
+                    prev_line = substr($0, length($1)+2)
+                }
+            '
+    )
+    echo "Done."
+}
+
+# ---- freshness ---------------------------------------------------------------
+
+cmd_freshness() {
+    local dir="$1"; shift
+    local max_age_days=7
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --max-age-days) max_age_days="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; usage ;;
+        esac
+    done
+
+    [[ -d "$dir" ]] || { echo "Error: '$dir' is not a directory." >&2; exit 1; }
+
+    local newest
+    if [[ "$(uname)" == "Darwin" ]]; then
+        newest=$(find "$dir" -type f ! -name "$MANIFEST_NAME" -exec stat -f '%m %N' {} \; 2>/dev/null \
+            | sort -rn | head -1 || true)
+    else
+        newest=$(find "$dir" -type f ! -name "$MANIFEST_NAME" -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | head -1 || true)
+    fi
+
+    if [[ -z "$newest" ]]; then
+        echo "No files found in $dir"
+        exit 1
+    fi
+
+    local newest_epoch newest_file now age_days
+    newest_epoch=$(echo "$newest" | awk '{print $1}')
+    newest_file=$(echo "$newest" | cut -d' ' -f2-)
+    now=$(date +%s)
+    age_days=$(( (now - ${newest_epoch%.*}) / 86400 ))
+
+    echo "Newest file in $dir:"
+    echo "  $newest_file"
+    echo "  age: $age_days day(s)"
+
+    if [[ $age_days -gt $max_age_days ]]; then
+        echo "  -> STALE (older than ${max_age_days}d threshold)"
+        exit 1
+    else
+        echo "  -> fresh (within ${max_age_days}d threshold)"
+    fi
+}
+
+# ---- dispatch -----------------------------------------------------------
+
+main() {
+    [[ $# -ge 1 ]] || usage
+    local cmd="$1"; shift
+
+    case "$cmd" in
+        checksum)   [[ $# -ge 1 ]] || usage; cmd_checksum "$1" ;;
+        verify)     [[ $# -ge 1 ]] || usage; cmd_verify "$1" ;;
+        copy)       [[ $# -ge 1 ]] || usage; cmd_copy "$@" ;;
+        sync)       [[ $# -ge 1 ]] || usage; cmd_sync "$@" ;;
+        dedupe)     [[ $# -ge 1 ]] || usage; cmd_dedupe "$1" ;;
+        freshness)  [[ $# -ge 1 ]] || usage; cmd_freshness "$@" ;;
+        *) echo "Unknown command: $cmd" >&2; usage ;;
+    esac
+}
+
+main "$@"
