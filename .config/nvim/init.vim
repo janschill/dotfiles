@@ -32,16 +32,30 @@ Plug 'christoomey/vim-tmux-navigator'
 Plug 'nvim-tree/nvim-web-devicons'
 Plug 'akinsho/bufferline.nvim', { 'tag': '*' }
 Plug 'catppuccin/nvim', { 'as': 'catppuccin-mocha' }
+Plug 'nvim-treesitter/nvim-treesitter', { 'do': ':TSUpdate' }
 call plug#end()
 
 " Set colorscheme
 colorscheme catppuccin-mocha
 
+" Treesitter: instant local syntax highlighting, independent of gopls.
+" LSP semantic tokens still refine it once the workspace index is ready.
+" Uses the rewritten main branch: install() is async+idempotent, and
+" highlighting is opted into per filetype via vim.treesitter.start().
+lua << EOF
+local ts_filetypes = { 'go', 'gomod', 'gosum', 'gowork', 'lua', 'vim', 'rust' }
+require('nvim-treesitter').install(ts_filetypes)
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = ts_filetypes,
+  callback = function() vim.treesitter.start() end,
+})
+EOF
+
 " Airline: minimal. Branch and git hunks live in the tmux bar, the file path
 " lives in the bufferline, so the statusline only carries mode, buffer name,
 " diagnostics and cursor position.
 let g:airline_section_b = ''
-let g:airline_section_c = '%t%m'
+let g:airline_section_c = '%f%m'
 let g:airline_section_x = ''
 let g:airline_section_y = ''
 let g:airline_section_z = '%l:%v'
@@ -75,6 +89,8 @@ nnoremap <silent> <leader>5 <cmd>BufferLineGoToBuffer 5<cr>
 
 " Key mappings
 nnoremap <leader>e :NERDTreeToggle<CR>
+" Reveal and highlight the current file in NERDTree
+nnoremap <leader>E :NERDTreeFind<CR>
 nnoremap <leader>ff <cmd>Telescope find_files<cr>
 nnoremap <leader>fg <cmd>Telescope live_grep<cr>
 nnoremap <leader>fb <cmd>Telescope buffers<cr>
