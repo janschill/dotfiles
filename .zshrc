@@ -5,6 +5,7 @@ autoload -Uz compinit
 fpath=($HOME/.docker/completions $fpath)
 # End of Docker CLI completions
 
+fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
 compinit
 
 if command -v fzf >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
@@ -49,5 +50,3 @@ alias claude-mem='$HOME/.bun/bin/bun "$HOME/.claude/plugins/marketplaces/thedotm
 
 eval "$(mise activate zsh)"
 
-# sentry
-fpath=("/Users/jan.schill/.local/share/zsh/site-functions" $fpath)
