@@ -1,3 +1,7 @@
+# Dedupe: FPATH is exported by brew shellenv, so nested shells would otherwise
+# accumulate duplicates and invalidate the compinit dump on every start.
+typeset -U fpath path
+
 autoload -U colors && colors
 autoload -Uz compinit
 
@@ -6,7 +10,16 @@ fpath=($HOME/.docker/completions $fpath)
 # End of Docker CLI completions
 
 fpath=("$HOME/.local/share/zsh/site-functions" $fpath)
-compinit
+
+# Full check at most once a day; otherwise trust the cached dump
+stale_zcompdump=(~/.zcompdump(N.mh+24))
+if (( $#stale_zcompdump )); then
+  compinit
+  touch ~/.zcompdump
+else
+  compinit -C
+fi
+unset stale_zcompdump
 
 if command -v fzf >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
   source <(fzf --zsh)
@@ -49,4 +62,3 @@ export PATH="$BUN_INSTALL/bin:$PATH"
 alias claude-mem='$HOME/.bun/bin/bun "$HOME/.claude/plugins/marketplaces/thedotmack/plugin/scripts/worker-service.cjs"'
 
 eval "$(mise activate zsh)"
-
