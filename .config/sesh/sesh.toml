@@ -1,0 +1,20 @@
+# Session per project. Pick with Alt+o (tmux), back to previous session with Alt+s.
+terminal = "ghostty"
+
+# Every git repo gets the same windows, so Alt+1/2/3 always mean claude/codex/shell.
+# Non-repo folders open as a plain shell (the script exits early).
+[default_session]
+startup_command = "~/.config/tmux/scripts/project-layout.sh"
+preview_command = "eza --all --git --icons --color=always {}"
+
+[[session]]
+name = "k9s"
+path = "~"
+startup_command = "k9s"
+
+# `sesh worktree connect <issue-or-PR>` from inside the repo: worktree + session in one go.
+[[worktree]]
+repo = "vippsas/vaam"
+path = "~/code/vippsas/vaam"
+worktree_dir = ".worktrees"
+base_branch = "origin/master"

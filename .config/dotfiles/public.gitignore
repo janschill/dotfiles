@@ -36,8 +36,10 @@
 !/.config/homebrew/
 !/.config/iterm2/
 !/.config/k9s/
+!/.config/lazygit/
 !/.config/mise/
 !/.config/nvim/
+!/.config/sesh/
 !/.config/tmux/
 !/.config/zsh/
 
@@ -69,16 +71,26 @@
 !/.config/k9s/skins/
 !/.config/k9s/skins/**
 
+/.config/lazygit/*
+!/.config/lazygit/config.yml
+
 /.config/mise/*
 !/.config/mise/config.toml
 
 /.config/nvim/*
 !/.config/nvim/init.vim
 
+/.config/sesh/*
+!/.config/sesh/sesh.toml
+
 /.config/tmux/*
 !/.config/tmux/tmux.conf
 !/.config/tmux/gitmux/
 !/.config/tmux/gitmux/.gitmux.conf
+!/.config/tmux/scripts/
+/.config/tmux/scripts/*
+!/.config/tmux/scripts/project-layout.sh
+!/.config/tmux/scripts/sesh-picker.sh
 
 /.config/zsh/*
 !/.config/zsh/aliases.zsh

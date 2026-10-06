@@ -1,0 +1,4 @@
+git:
+  diffRenderers:
+    - type: stdinFilter
+      command: delta --dark --paging=never

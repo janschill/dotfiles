@@ -13,6 +13,7 @@
 	editor = nvim
 	fileMode = false
 	ignorecase = true
+	pager = delta
 
 [diff]
 	algorithm = histogram
@@ -61,11 +62,13 @@
 	email = janschill@proton.me
 	name = Jan
 
-# [delta]
-# 	minus-style = "#fdf6e3 #dc322f"
-# 	plus-style = "#fdf6e3 #859900"
-# 	side-by-side = false
-# 	syntax-theme = "solarized-dark"
+[interactive]
+	diffFilter = delta --color-only
+
+[delta]
+	# n/N jumps between files in diffs
+	navigate = true
+	line-numbers = true
 [includeIf "gitdir:~/code/vippsas/**"]
 	path = ~/.config/git/work.gitconfig
 
