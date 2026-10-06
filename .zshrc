@@ -49,7 +49,7 @@ if command -v zoxide &> /dev/null; then
   [[ -o interactive ]] && eval "$(zoxide init zsh --cmd cd)"
 fi
 
-test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
+[[ "$TERM_PROGRAM" == "iTerm.app" ]] && test -e "${HOME}/.iterm2_shell_integration.zsh" && source "${HOME}/.iterm2_shell_integration.zsh"
 
 
 # bun completions

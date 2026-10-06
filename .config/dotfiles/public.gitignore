@@ -31,6 +31,7 @@
 /.config/*
 !/.config/dlv/
 !/.config/dotfiles/
+!/.config/ghostty/
 !/.config/git/
 !/.config/homebrew/
 !/.config/iterm2/
@@ -48,6 +49,9 @@
 !/.config/dotfiles/install.sh
 !/.config/dotfiles/macos.sh
 !/.config/dotfiles/public.gitignore
+
+/.config/ghostty/*
+!/.config/ghostty/config
 
 /.config/git/*
 !/.config/git/ignore

@@ -1,0 +1,5 @@
+# Send Option as Alt/Meta (like iTerm2's "Esc+") so tmux M-<key> bindings work.
+macos-option-as-alt = left
+
+# Install Ghostty's terminfo on SSH hosts (falls back to xterm-256color) so remote TERM works.
+shell-integration-features = ssh-terminfo,ssh-env
