@@ -39,7 +39,6 @@
 !/.config/lazygit/
 !/.config/mise/
 !/.config/nvim/
-!/.config/sesh/
 !/.config/tmux/
 !/.config/zsh/
 
@@ -79,9 +78,6 @@
 
 /.config/nvim/*
 !/.config/nvim/init.vim
-
-/.config/sesh/*
-!/.config/sesh/sesh.toml
 
 /.config/tmux/*
 !/.config/tmux/tmux.conf
