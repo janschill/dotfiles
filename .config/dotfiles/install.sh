@@ -101,6 +101,15 @@ install_neovim_plugins() {
   nvim --headless +PlugInstall +qall
 }
 
+setup_gh() {
+  gh config set pager delta
+
+  if ! gh extension list | grep -q 'dlvhdr/gh-dash'; then
+    gh extension install dlvhdr/gh-dash ||
+      echo "gh-dash not installed: run 'gh auth login', then re-run this script."
+  fi
+}
+
 main() {
   echo "Setting up dotfiles"
 
@@ -126,6 +135,7 @@ main() {
   fi
 
   install_neovim_plugins
+  setup_gh
 
   echo "Dotfiles setup complete. Restart your shell or run: source ~/.zshrc"
 }
